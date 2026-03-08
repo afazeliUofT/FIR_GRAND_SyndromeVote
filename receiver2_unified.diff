@@ -1,0 +1,463 @@
+--- /mnt/data/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py	2026-03-08 20:07:46.808192977 +0000
++++ /mnt/data/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH_receiver2.py	2026-03-08 20:22:14.785865879 +0000
+@@ -1530,6 +1530,11 @@
+     pattern_overgen_ratio: float = 1.02    # used only when max_bits_from_cluster is None
+     max_syndrome_weight_for_grand: Optional[int] = None
+ 
++    # Receiver front-end selection
++    selection_mode: str = "llr"            # "llr" (Receiver 1) or "syndrome_vote" (Receiver 2)
++    sv_epsilon: float = 1e-3               # epsilon in eta_v = u_v / (rho_v + epsilon)
++    sv_check_cover_k: int = 0              # k_cc ; 0 disables check-cover seeding
++
+ 
+ 
+ ### CELL number 23 ###
+@@ -2154,6 +2159,165 @@
+ 
+ 
+ 
++def _auto_pick_grand_search_size(L_full: int, cfg: ClusterGrandConfig) -> int:
++    """Choose the GRAND search size L.
++
++    If max_bits_from_cluster is None, pick the largest L whose generated pattern
++    count stays close to cfg.max_patterns (using cfg.pattern_overgen_ratio).
++    Otherwise, clamp to max_bits_from_cluster.
++    """
++    L_full = int(max(L_full, 0))
++    if L_full <= 0:
++        return 0
++
++    if cfg.max_bits_from_cluster is None:
++        over = float(getattr(cfg, "pattern_overgen_ratio", 1.02) or 1.02)
++        target = max(1, int(round(over * int(cfg.max_patterns))))
++        max_w = max(1, int(cfg.max_weight))
++
++        L = 1
++        while True:
++            L_try = L + 1
++            total = 0
++            for w in range(1, max_w + 1):
++                total += math.comb(L_try, w)
++                if total > target:
++                    break
++            if total > target:
++                break
++            if L_try >= L_full:
++                L = L_try
++                break
++            L = L_try
++        return int(min(max(L, 1), L_full))
++
++    return int(min(max(int(cfg.max_bits_from_cluster), 0), L_full))
++
++
++
++def _select_search_vars_llr(union_vars: np.ndarray,
++                            llr_for_sort: np.ndarray,
++                            L: int) -> Tuple[np.ndarray, Dict[str, int]]:
++    """Receiver 1 front-end: pick the L least reliable bits in the union."""
++    L = int(max(L, 0))
++    union_vars = np.asarray(union_vars, dtype=np.int32)
++    if L <= 0 or union_vars.size == 0:
++        return np.array([], dtype=np.int32), {
++            "selection_mode_used": "llr",
++            "sv_seeded_count": 0,
++            "sv_neighbor_visits": 0,
++            "sv_score_len": int(union_vars.size),
++        }
++
++    abs_llr_union = np.abs(llr_for_sort[union_vars])
++    order = np.argsort(abs_llr_union, kind="stable")
++    search_vars = union_vars[order[:L]].astype(np.int32, copy=False)
++    return search_vars, {
++        "selection_mode_used": "llr",
++        "sv_seeded_count": 0,
++        "sv_neighbor_visits": 0,
++        "sv_score_len": int(union_vars.size),
++    }
++
++
++
++def _select_search_vars_syndrome_vote(union_vars: np.ndarray,
++                                      unsat_checks: np.ndarray,
++                                      code_cfg: CodeConfig,
++                                      llr_for_sort: np.ndarray,
++                                      L: int,
++                                      cfg: ClusterGrandConfig) -> Tuple[np.ndarray, Dict[str, int]]:
++    """Receiver 2 front-end: syndrome-vote ranking with optional check-cover seeding.
++
++    Score:
++        eta_v = u_v / (rho_v + epsilon)
++    where u_v counts the number of unsatisfied checks touching v and
++    rho_v = |LLR_v| from the selected LLR source.
++
++    Check-cover seeding:
++        For each unsatisfied check j, include up to k_cc of its least reliable
++        neighbours before filling the remaining budget from the global score rank.
++    """
++    union_vars = np.asarray(union_vars, dtype=np.int32)
++    unsat_checks = np.asarray(unsat_checks, dtype=np.int32)
++    L = int(max(L, 0))
++
++    if L <= 0 or union_vars.size == 0:
++        return np.array([], dtype=np.int32), {
++            "selection_mode_used": "syndrome_vote",
++            "sv_seeded_count": 0,
++            "sv_neighbor_visits": 0,
++            "sv_score_len": int(union_vars.size),
++        }
++
++    abs_llr_union = np.abs(llr_for_sort[union_vars]).astype(np.float64, copy=False)
++    eps = float(getattr(cfg, "sv_epsilon", 1e-3) or 1e-3)
++    k_cc = max(0, int(getattr(cfg, "sv_check_cover_k", 0) or 0))
++
++    vote_counts = np.zeros(union_vars.size, dtype=np.int32)
++    var_to_local = {int(v): i for i, v in enumerate(union_vars.tolist())}
++
++    seed_list: List[int] = []
++    seeded = set()
++    sv_neighbor_visits = 0
++
++    for j in unsat_checks:
++        local_neighbors: List[int] = []
++        for v in code_cfg.checks_to_vars[int(j)]:
++            v_int = int(v)
++            loc = var_to_local.get(v_int, None)
++            if loc is None:
++                continue
++            vote_counts[loc] += 1
++            local_neighbors.append(loc)
++            sv_neighbor_visits += 1
++
++        if k_cc > 0 and local_neighbors:
++            # Least reliable neighbours first; deterministic tie-break by vote then index.
++            local_neighbors_sorted = sorted(
++                local_neighbors,
++                key=lambda loc: (float(abs_llr_union[loc]), -int(vote_counts[loc]), int(union_vars[loc]))
++            )
++            take = min(k_cc, len(local_neighbors_sorted))
++            for loc in local_neighbors_sorted[:take]:
++                v_int = int(union_vars[loc])
++                if v_int not in seeded:
++                    seed_list.append(v_int)
++                    seeded.add(v_int)
++
++    # Global score rank for Receiver 2
++    scores = vote_counts.astype(np.float64) / (abs_llr_union + eps)
++    global_order = sorted(
++        range(union_vars.size),
++        key=lambda loc: (-float(scores[loc]), float(abs_llr_union[loc]), -int(vote_counts[loc]), int(union_vars[loc]))
++    )
++
++    selected: List[int] = []
++    seen = set()
++
++    for v_int in seed_list:
++        if len(selected) >= L:
++            break
++        if v_int not in seen:
++            selected.append(int(v_int))
++            seen.add(int(v_int))
++
++    for loc in global_order:
++        if len(selected) >= L:
++            break
++        v_int = int(union_vars[loc])
++        if v_int not in seen:
++            selected.append(v_int)
++            seen.add(v_int)
++
++    return np.asarray(selected[:L], dtype=np.int32), {
++        "selection_mode_used": "syndrome_vote",
++        "sv_seeded_count": int(min(len(seed_list), L)),
++        "sv_neighbor_visits": int(sv_neighbor_visits),
++        "sv_score_len": int(union_vars.size),
++    }
++
++
+ ### CELL number 27 ### updated
+ def run_local_grand_on_union_of_clusters(frame: FrameLog,
+                                          sim_cfg: SimulationConfig,
+@@ -2387,48 +2551,32 @@
+         setattr(res, "llr_source_used", str(llr_source_used))
+         return res
+ 
+-    # AUTO-pick L if max_bits_from_cluster is None
+-    if cfg.max_bits_from_cluster is None:
+-        # keep number of generated patterns close to max_patterns
+-        over = float(getattr(cfg, "pattern_overgen_ratio", 1.02) or 1.02)
+-        target = max(1, int(round(over * int(cfg.max_patterns))))
++    # Determine the search-space budget L, then choose the front-end ranking.
++    L = _auto_pick_grand_search_size(L_full, cfg)
++    selection_mode = str(getattr(cfg, "selection_mode", "llr") or "llr").strip().lower()
++
++    if selection_mode in ("syndrome_vote", "sv", "receiver2"):
++        search_vars, front_end_meta = _select_search_vars_syndrome_vote(
++            union_vars=union_vars,
++            unsat_checks=unsat_checks,
++            code_cfg=code_cfg,
++            llr_for_sort=llr_for_sort,
++            L=L,
++            cfg=cfg,
++        )
++    else:
++        search_vars, front_end_meta = _select_search_vars_llr(
++            union_vars=union_vars,
++            llr_for_sort=llr_for_sort,
++            L=L,
++        )
+ 
+-        # Find largest L such that sum_{w=1..max_weight} C(L, w) <= target
+-        max_w = max(1, int(cfg.max_weight))
+-        L = 1
+-        while True:
+-            L_try = L + 1
+-            total = 0
+-            for w in range(1, max_w + 1):
+-                total += math.comb(L_try, w)
+-                if total > target:
+-                    break
+-            if total > target:
+-                break
+-            if L_try >= L_full:
+-                L = L_try
+-                break
+-            L = L_try
++    selection_mode_used = str(front_end_meta.get("selection_mode_used", "llr"))
++    sv_seeded_count = int(front_end_meta.get("sv_seeded_count", 0))
++    sv_neighbor_visits = int(front_end_meta.get("sv_neighbor_visits", 0))
++    sv_score_len = int(front_end_meta.get("sv_score_len", L_full))
+ 
+-        # clamp
+-        L = int(min(max(L, 1), L_full))
+-        # Select L least reliable bits in the union
+-        abs_llr_union = np.abs(llr_for_sort[union_vars])
+-        order = np.argsort(abs_llr_union)
+-        search_vars = union_vars[order[:L]]
+-    else:
+-        # Order union bits by |LLR| and truncate by max_bits_from_cluster
+-        abs_llr_union = np.abs(llr_for_sort[union_vars])
+-        order = np.argsort(abs_llr_union)
+-        union_sorted = union_vars[order]
+-
+-        L = int(L_full)
+-        if int(cfg.max_bits_from_cluster) < L_full:
+-            search_vars = union_sorted[:int(cfg.max_bits_from_cluster)]
+-            L = int(search_vars.size)
+-        else:
+-            search_vars = union_sorted
+-            L = int(L_full)
++    L = int(search_vars.size)
+ 
+     if L == 0:
+         res = ClusterGrandResult(
+@@ -2459,6 +2607,10 @@
+         setattr(res, "positions_packed_evaluated", 0)
+         setattr(res, "batch_size_used", 0)
+         setattr(res, "llr_source_used", str(llr_source_used))
++        setattr(res, "selection_mode_used", str(selection_mode_used))
++        setattr(res, "sv_seeded_count", int(sv_seeded_count))
++        setattr(res, "sv_neighbor_visits", int(sv_neighbor_visits))
++        setattr(res, "sv_score_len", int(sv_score_len))
+         return res
+ 
+     patterns_tested = 0
+@@ -2748,6 +2900,10 @@
+     setattr(res, "batch_size_used", int(batch_size_used))
+ 
+     setattr(res, "llr_source_used", str(llr_source_used))
++    setattr(res, "selection_mode_used", str(selection_mode_used))
++    setattr(res, "sv_seeded_count", int(sv_seeded_count))
++    setattr(res, "sv_neighbor_visits", int(sv_neighbor_visits))
++    setattr(res, "sv_score_len", int(sv_score_len))
+ 
+     return res
+ 
+@@ -2805,6 +2961,50 @@
+     max_syndrome_weight_for_grand=None,
+     batch_size=_get_int_env("GRAND_BATCH_SIZE", 256),
+ )
++
++# ---- Receiver 2: syndrome-vote + check-cover front-end ----
++RUN_RECEIVER2 = bool(_get_int_env("RUN_RECEIVER2", 0))
++GRAND_SV_USE_BOOST = bool(_get_int_env("GRAND_SV_USE_BOOST", _get_int_env("GRAND_USE_BOOST", 1)))
++
++grand_cfg_awgn_sv = ClusterGrandConfig(
++    max_weight=_get_int_env("GRAND_SV_MAX_WEIGHT", _get_int_env("GRAND_MAX_WEIGHT", 5)),
++    max_patterns=_get_int_env("GRAND_SV_MAX_PATTERNS", _get_int_env("GRAND_MAX_PATTERNS", 5000)),
++    max_bits_from_cluster=None,     # keep auto-pick L
++    verbose=False,
++    llr_source=os.environ.get(
++        "GRAND_SV_LLR_SOURCE",
++        os.environ.get("GRAND_LLR_SOURCE", "channel"),
++    ).strip().lower(),
++    pattern_overgen_ratio=_get_float_env(
++        "GRAND_SV_OVERGEN",
++        _get_float_env("GRAND_OVERGEN", 1.02),
++    ),
++    max_syndrome_weight_for_grand=None,
++    batch_size=_get_int_env("GRAND_SV_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256)),
++    selection_mode="syndrome_vote",
++    sv_epsilon=_get_float_env("GRAND_SV_EPSILON", 1e-3),
++    sv_check_cover_k=_get_int_env("GRAND_SV_CHECK_COVER_K", 1),
++)
++
++grand_cfg_awgn_sv_boost = ClusterGrandConfig(
++    max_weight=_get_int_env("GRAND_SV_BOOST_MAX_WEIGHT", _get_int_env("GRAND_BOOST_MAX_WEIGHT", 5)),
++    max_patterns=_get_int_env("GRAND_SV_BOOST_MAX_PATTERNS", _get_int_env("GRAND_BOOST_MAX_PATTERNS", 15000)),
++    max_bits_from_cluster=None,     # keep auto-pick L
++    verbose=False,
++    llr_source=os.environ.get(
++        "GRAND_SV_LLR_SOURCE",
++        os.environ.get("GRAND_LLR_SOURCE", "channel"),
++    ).strip().lower(),
++    pattern_overgen_ratio=_get_float_env(
++        "GRAND_SV_BOOST_OVERGEN",
++        _get_float_env("GRAND_BOOST_OVERGEN", 1.02),
++    ),
++    max_syndrome_weight_for_grand=None,
++    batch_size=_get_int_env("GRAND_SV_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256)),
++    selection_mode="syndrome_vote",
++    sv_epsilon=_get_float_env("GRAND_SV_EPSILON", 1e-3),
++    sv_check_cover_k=_get_int_env("GRAND_SV_CHECK_COVER_K", 1),
++)
+ # ======================================================================
+ 
+ 
+@@ -2987,6 +3187,8 @@
+     search_sz = int(getattr(result, "search_size", 0))
+     patterns_gen = int(getattr(result, "patterns_generated", 0))
+     sumw_gen = int(getattr(result, "sum_pattern_weights_generated", 0))
++    selection_mode_used = str(getattr(result, "selection_mode_used", "llr") or "llr").strip().lower()
++    sv_score_len = int(getattr(result, "sv_score_len", llr_sort_len))
+ 
+     # --- Cluster extraction proxies ---
+     cluster_unsat_edges = int(getattr(result, "cluster_unsat_edges", 0))
+@@ -3016,9 +3218,16 @@
+     cycles += _ceil_div(llr_sort_len, abs_pc)
+     cycles += _ceil_div(search_sz, abs_pc)
+ 
+-    # (3) Sort union bits by |LLR| : O(n log2 n)
++    # (3) Sort union bits by the front-end key:
++    #     - Receiver 1 : |LLR|
++    #     - Receiver 2 : eta_v = u_v / (rho_v + epsilon)
+     cycles += _ceil_div(llr_sort_len * _safe_log2_int(llr_sort_len), sort_pc)
+ 
++    # Small extra arithmetic for Receiver 2 score formation. The unsatisfied-check
++    # neighbour scan itself is already covered by cluster_unsat_edges above.
++    if selection_mode_used in ("syndrome_vote", "sv", "receiver2"):
++        cycles += _ceil_div(sv_score_len, add_pc)
++
+     # (4) Pattern cost computation: total number of |LLR| terms summed
+     cycles += _ceil_div(sumw_gen, add_pc)
+ 
+@@ -3240,6 +3449,7 @@
+     rng_seed: Optional[int] = None,
+     label: Optional[str] = None,
+     hw_model: Optional[HardwareTimingModel] = None,
++    grand_cfg_boost: Optional[ClusterGrandConfig] = None,
+ ) -> Dict[str, Any]:
+     """
+     Hybrid decoder (two-stage):
+@@ -3267,6 +3477,9 @@
+     if hw_model is None:
+         hw_model = HW_MODEL
+ 
++    if grand_cfg_boost is None and ("GRAND_USE_BOOST" in globals()) and GRAND_USE_BOOST and ("grand_cfg_awgn_boost" in globals()):
++        grand_cfg_boost = grand_cfg_awgn_boost
++
+     if label is None:
+         label = f"hyb: LDPC({dec_cfg_stage1.max_iters})+GRAND (snap={snapshot_iter})"
+ 
+@@ -3385,21 +3598,21 @@
+                 print(f"[WARN] GRAND failed to run on frame {frame_id} at snap={snapshot_iter}: {e}")
+                 res = None
+ 
+-            # If baseline GRAND exhausted its search and failed, optionally boost
+-            if (res is not None) and (not bool(res.success)) and ("GRAND_USE_BOOST" in globals()) and GRAND_USE_BOOST:
++            # If the first GRAND attempt exhausted its search and failed, optionally boost.
++            if (res is not None) and (not bool(res.success)) and (grand_cfg_boost is not None):
+                 pt1 = int(getattr(res, "patterns_tested", 0))
+                 pg1 = int(getattr(res, "patterns_generated", 0))
+                 cap1 = int(getattr(grand_cfg, "max_patterns", pt1))
+ 
+                 exhausted = (pg1 > 0) and (pt1 >= min(pg1, cap1))
+ 
+-                if exhausted and ("grand_cfg_awgn_boost" in globals()):
++                if exhausted:
+                     try:
+                         res2 = run_local_grand_on_union_of_clusters(
+                             frame=frame,
+                             sim_cfg=sim_cfg,
+                             snapshot_iter=int(snapshot_iter),
+-                            cfg=grand_cfg_awgn_boost,
++                            cfg=grand_cfg_boost,
+                         )
+                     except Exception as e:
+                         print(f"[WARN] BOOST GRAND failed on frame {frame_id} at snap={snapshot_iter}: {e}")
+@@ -3594,6 +3807,12 @@
+         "per_frame_cluster_unsat_edges": np.array(per_frame_cluster_unsat_edges, dtype=np.int64),
+         "per_frame_cluster_pair_edges": np.array(per_frame_cluster_pair_edges, dtype=np.int64),
+ 
++        # Stage-2 configuration (kept in the raw pickle; CSV summaries stay unchanged)
++        "grand_selection_mode": str(getattr(grand_cfg, "selection_mode", "llr")),
++        "grand_llr_source": str(getattr(grand_cfg, "llr_source", "posterior")),
++        "grand_sv_check_cover_k": int(getattr(grand_cfg, "sv_check_cover_k", 0)),
++        "grand_sv_epsilon": float(getattr(grand_cfg, "sv_epsilon", 0.0)),
++
+         "hw_model": asdict(hw_model),
+     }
+ 
+@@ -4360,6 +4579,7 @@
+     
+ 
+     base_seed = _env_int("RNG_SEED_GLOBAL", 12345) + _stable_u32_seed_from_string(code_cfg.code_name)
++    run_receiver2 = bool(_env_int("RUN_RECEIVER2", 0))
+ 
+     results: Dict[float, Dict[str, Any]] = {}
+ 
+@@ -4412,7 +4632,7 @@
+                 label=dec_name,
+             )
+ 
+-        # Scenario 3: Complete hybrid (Stage-1 LDPC + GRAND rescue)
++        # Scenario 3: Complete hybrid (Receiver 1 = LLR-ranked GRAND rescue)
+         for it in stage1_list:
+             dec_name = f"hyb{int(it)}"
+             seed = int((base_seed + 10_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+@@ -4434,8 +4654,35 @@
+                 mc_cfg=mc_cfg_local,
+                 rng_seed=seed,
+                 label=dec_name,
++                grand_cfg_boost=(grand_cfg_awgn_boost if GRAND_USE_BOOST else None),
+             )
+ 
++        # Scenario 4: Receiver 2 (syndrome-vote + check-cover front-end)
++        if run_receiver2:
++            for it in stage1_list:
++                dec_name = f"hybsv{int(it)}"
++                seed = int((base_seed + 20_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
++                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
++
++                sim_cfg_hyb = SimulationConfig(
++                    code=code_cfg,
++                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
++                    interleaver=interleaver,
++                    rng_seed_global=int(base_seed),
++                    snapshot_iters=[int(it)],  # snapshot only what GRAND needs
++                )
++
++                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
++                    sim_cfg=sim_cfg_hyb,
++                    dec_cfg_stage1=dec_cfg,
++                    grand_cfg=grand_cfg_awgn_sv,
++                    snapshot_iter=int(it),
++                    mc_cfg=mc_cfg_local,
++                    rng_seed=seed,
++                    label=dec_name,
++                    grand_cfg_boost=(grand_cfg_awgn_sv_boost if GRAND_SV_USE_BOOST else None),
++                )
++
+         return snr_db, per_snr
+ 
+     if use_parallel:

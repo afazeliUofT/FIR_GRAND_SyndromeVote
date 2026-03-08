@@ -1,0 +1,45 @@
+--- /mnt/data/run_ms.sbatch	2026-03-08 20:07:55.973455201 +0000
++++ /mnt/data/run_ms_receiver2.sbatch	2026-03-08 20:22:54.045340746 +0000
+@@ -79,10 +79,11 @@
+ export SIONNA_LLR_MAX=${SIONNA_LLR_MAX:-50.0}
+ 
+ # ===== GRAND knobs =====
++# Receiver 1 / baseline GRAND knobs
+ # Use channel LLRs for GRAND bit-ranking (recommended)
+ export GRAND_LLR_SOURCE=${GRAND_LLR_SOURCE:-channel}
+ 
+-# Defaults match the Python defaults (safe). Increase if you want stronger Hybrid performance.
++# Defaults kept close to your current setup so legacy outputs still appear.
+ export GRAND_MAX_WEIGHT=${GRAND_MAX_WEIGHT:-6}
+ export GRAND_MAX_PATTERNS=${GRAND_MAX_PATTERNS:-8000}
+ export GRAND_USE_BOOST=${GRAND_USE_BOOST:-1}
+@@ -90,6 +91,19 @@
+ export GRAND_BOOST_MAX_PATTERNS=${GRAND_BOOST_MAX_PATTERNS:-30000}
+ export GRAND_BATCH_SIZE=${GRAND_BATCH_SIZE:-256}
+ 
++# Receiver 2: syndrome-vote + check-cover front-end.
++# These defaults are intentionally more aggressive than Receiver 1 to maximize BER/BLER gain.
++export RUN_RECEIVER2=${RUN_RECEIVER2:-1}
++export GRAND_SV_LLR_SOURCE=${GRAND_SV_LLR_SOURCE:-${GRAND_LLR_SOURCE:-channel}}
++export GRAND_SV_CHECK_COVER_K=${GRAND_SV_CHECK_COVER_K:-1}
++export GRAND_SV_EPSILON=${GRAND_SV_EPSILON:-1e-3}
++export GRAND_SV_MAX_WEIGHT=${GRAND_SV_MAX_WEIGHT:-7}
++export GRAND_SV_MAX_PATTERNS=${GRAND_SV_MAX_PATTERNS:-20000}
++export GRAND_SV_USE_BOOST=${GRAND_SV_USE_BOOST:-1}
++export GRAND_SV_BOOST_MAX_WEIGHT=${GRAND_SV_BOOST_MAX_WEIGHT:-7}
++export GRAND_SV_BOOST_MAX_PATTERNS=${GRAND_SV_BOOST_MAX_PATTERNS:-120000}
++export GRAND_SV_BATCH_SIZE=${GRAND_SV_BATCH_SIZE:-${GRAND_BATCH_SIZE:-256}}
++
+ # Sweep + Monte-Carlo limits
+ # ---- IMPORTANT: avoid accidental overrides from your login-shell environment ----
+ # Default behavior: FORCE_DEFAULTS=1 -> ignore any inherited env vars for these knobs.
+@@ -112,6 +126,9 @@
+ echo "[SBATCH CONFIG] LDPC_ITERS=${LDPC_ITERS}"
+ echo "[SBATCH CONFIG] STAGE1_ITERS=${STAGE1_ITERS}"
+ echo "[SBATCH CONFIG] TARGET_FRAME_ERRORS=${TARGET_FRAME_ERRORS}  MAX_FRAMES=${MAX_FRAMES}"
++echo "[SBATCH CONFIG] RUN_RECEIVER2=${RUN_RECEIVER2}  GRAND_SV_CHECK_COVER_K=${GRAND_SV_CHECK_COVER_K}  GRAND_SV_EPSILON=${GRAND_SV_EPSILON}"
++echo "[SBATCH CONFIG] GRAND_SV_MAX_WEIGHT=${GRAND_SV_MAX_WEIGHT}  GRAND_SV_MAX_PATTERNS=${GRAND_SV_MAX_PATTERNS}"
++echo "[SBATCH CONFIG] GRAND_SV_BOOST_MAX_WEIGHT=${GRAND_SV_BOOST_MAX_WEIGHT}  GRAND_SV_BOOST_MAX_PATTERNS=${GRAND_SV_BOOST_MAX_PATTERNS}"
+ 
+ # ===== Run =====
+ SCRIPT=${SCRIPT:-HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py}
