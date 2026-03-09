@@ -1526,7 +1526,7 @@ class ClusterGrandConfig:
     batch_size: int = 256
 
     # --- New knobs (hybrid performance + robustness) ---
-    llr_source: str = "posterior"          # "posterior" or "channel"
+    llr_source: str = "posterior"          # "posterior", "channel", or "mixed"
     pattern_overgen_ratio: float = 1.02    # used only when max_bits_from_cluster is None
     max_syndrome_weight_for_grand: Optional[int] = None
 
@@ -1534,6 +1534,14 @@ class ClusterGrandConfig:
     selection_mode: str = "llr"            # "llr" (Receiver 1) or "syndrome_vote" (Receiver 2)
     sv_epsilon: float = 1e-3               # epsilon in eta_v = u_v / (rho_v + epsilon)
     sv_check_cover_k: int = 0              # k_cc ; 0 disables check-cover seeding
+
+    # Receiver 3 / stronger pre-solver knobs
+    pre_solver_mode: str = "none"          # "none" or "peel_gf2"
+    peel_candidate_ratio: float = 1.50     # L_peel ~= ratio * L_search
+    peel_max_bits: Optional[int] = None    # hard cap on peel candidate size
+    peel_dense_max_vars: int = 32          # exact weighted GF(2) solve only if residual vars <= this
+    peel_max_free_enum: int = 12           # enumerate weighted nullspace only if free dimension <= this
+    peel_extra_llr_bits: int = 0           # add this many plain-LLR candidates to the peel set
 
 
 
@@ -2318,7 +2326,640 @@ def _select_search_vars_syndrome_vote(union_vars: np.ndarray,
     }
 
 
-### CELL number 27 ### updated
+
+def _resolve_sort_llr_vector(llr_snapshot: np.ndarray,
+                             llr_channel: Optional[np.ndarray],
+                             cfg: ClusterGrandConfig) -> Tuple[np.ndarray, str]:
+    """Resolve the LLR vector used for ranking/costing.
+
+    Supported sources:
+      - "posterior": use the stage-1 snapshot posterior LLRs
+      - "channel"  : use the channel LLRs when available
+      - "mixed"    : conservative magnitude = min(|posterior|, |channel|)
+                     with posterior sign carried for deterministic ordering
+    """
+    llr_snapshot = np.asarray(llr_snapshot, dtype=np.float32)
+    llr_source = str(getattr(cfg, "llr_source", "posterior") or "posterior").strip().lower()
+
+    if llr_source == "channel":
+        if llr_channel is not None:
+            return np.asarray(llr_channel, dtype=np.float32), "channel"
+        return llr_snapshot, "posterior"
+
+    if llr_source in ("mixed", "hybrid", "minabs"):
+        if llr_channel is not None:
+            llr_channel = np.asarray(llr_channel, dtype=np.float32)
+            abs_mix = np.minimum(np.abs(llr_snapshot), np.abs(llr_channel)).astype(np.float32, copy=False)
+            sign_ref = np.sign(llr_snapshot).astype(np.float32, copy=False)
+            zero_mask = (sign_ref == 0)
+            if np.any(zero_mask):
+                sign_ref = sign_ref.copy()
+                if llr_channel is not None:
+                    sign_ref[zero_mask] = np.sign(llr_channel[zero_mask]).astype(np.float32, copy=False)
+                    zero_mask = (sign_ref == 0)
+                if np.any(zero_mask):
+                    sign_ref[zero_mask] = 1.0
+            return (sign_ref * abs_mix).astype(np.float32, copy=False), "mixed"
+        return llr_snapshot, "posterior"
+
+    return llr_snapshot, "posterior"
+
+
+def _auto_pick_peel_candidate_size(L_full: int,
+                                   L_search: int,
+                                   cfg: ClusterGrandConfig) -> int:
+    """Choose L_peel >= L_search, capped by peel_max_bits / L_full."""
+    L_full = int(max(L_full, 0))
+    L_search = int(max(L_search, 0))
+    if L_full <= 0:
+        return 0
+
+    ratio = float(getattr(cfg, "peel_candidate_ratio", 1.0) or 1.0)
+    ratio = max(1.0, ratio)
+    L_peel = int(np.ceil(ratio * max(L_search, 1)))
+
+    peel_max_bits = getattr(cfg, "peel_max_bits", None)
+    if isinstance(peel_max_bits, int) and peel_max_bits > 0:
+        L_peel = min(L_peel, int(peel_max_bits))
+
+    L_peel = max(L_peel, max(L_search, 1))
+    return int(min(L_peel, L_full))
+
+
+def _select_presolver_vars(union_vars: np.ndarray,
+                           unsat_checks: np.ndarray,
+                           code_cfg: CodeConfig,
+                           llr_for_sort: np.ndarray,
+                           L_peel: int,
+                           cfg: ClusterGrandConfig) -> Tuple[np.ndarray, Dict[str, int]]:
+    """Receiver-3 candidate-set construction.
+
+    Base list:
+      - uses the configured front-end selection mode (LLR or syndrome-vote)
+
+    Optional strengthening:
+      - append a small number of extra plain-LLR candidates so the pre-solver
+        is less brittle if the syndrome-vote list misses a true error bit.
+    """
+    union_vars = np.asarray(union_vars, dtype=np.int32)
+    L_peel = int(max(L_peel, 0))
+    if L_peel <= 0 or union_vars.size == 0:
+        return np.array([], dtype=np.int32), {
+            "selection_mode_used": str(getattr(cfg, "selection_mode", "llr")),
+            "sv_seeded_count": 0,
+            "sv_neighbor_visits": 0,
+            "sv_score_len": int(union_vars.size),
+            "peel_extra_llr_added": 0,
+        }
+
+    selection_mode = str(getattr(cfg, "selection_mode", "llr") or "llr").strip().lower()
+    if selection_mode in ("syndrome_vote", "sv", "receiver2"):
+        base_vars, meta = _select_search_vars_syndrome_vote(
+            union_vars=union_vars,
+            unsat_checks=unsat_checks,
+            code_cfg=code_cfg,
+            llr_for_sort=llr_for_sort,
+            L=L_peel,
+            cfg=cfg,
+        )
+    else:
+        base_vars, meta = _select_search_vars_llr(
+            union_vars=union_vars,
+            llr_for_sort=llr_for_sort,
+            L=L_peel,
+        )
+
+    selected = [int(v) for v in np.asarray(base_vars, dtype=np.int32).tolist()]
+    seen = set(selected)
+
+    extra_llr = max(0, int(getattr(cfg, "peel_extra_llr_bits", 0) or 0))
+    extra_added = 0
+    if extra_llr > 0 and len(selected) < L_peel:
+        llr_vars, _ = _select_search_vars_llr(
+            union_vars=union_vars,
+            llr_for_sort=llr_for_sort,
+            L=min(int(union_vars.size), int(L_peel + extra_llr)),
+        )
+        for v in np.asarray(llr_vars, dtype=np.int32).tolist():
+            v_int = int(v)
+            if v_int not in seen:
+                selected.append(v_int)
+                seen.add(v_int)
+                extra_added += 1
+            if len(selected) >= L_peel:
+                break
+
+    out = np.asarray(selected[:L_peel], dtype=np.int32)
+    meta = dict(meta)
+    meta["peel_extra_llr_added"] = int(extra_added)
+    return out, meta
+
+
+def _build_local_subsystem_for_candidate(candidate_vars: np.ndarray,
+                                         unsat_checks: np.ndarray,
+                                         code_cfg: CodeConfig,
+                                         syndrome: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Build A, b for H_sub e = syndrome on a localized row set.
+
+    Row set = all checks touched by candidate_vars UNION all unsatisfied checks.
+    If a selected candidate set cannot touch some unsatisfied check, that row
+    becomes all-zero with RHS=1, and the solver correctly declares failure.
+    """
+    candidate_vars = np.asarray(candidate_vars, dtype=np.int32)
+    unsat_checks = np.asarray(unsat_checks, dtype=np.int32)
+
+    row_set = set(int(j) for j in unsat_checks.tolist())
+    for v in candidate_vars.tolist():
+        for j in code_cfg.vars_to_checks[int(v)]:
+            row_set.add(int(j))
+
+    rows = np.array(sorted(row_set), dtype=np.int32)
+    m = int(rows.size)
+    n = int(candidate_vars.size)
+    if m == 0 or n == 0:
+        return np.zeros((0, n), dtype=np.uint8), np.zeros((0,), dtype=np.uint8)
+
+    row_to_idx = {int(j): i for i, j in enumerate(rows.tolist())}
+    A = np.zeros((m, n), dtype=np.uint8)
+    for c_idx, v in enumerate(candidate_vars.tolist()):
+        for j in code_cfg.vars_to_checks[int(v)]:
+            r_idx = row_to_idx[int(j)]
+            A[r_idx, c_idx] ^= np.uint8(1)
+
+    b = syndrome[rows].astype(np.uint8, copy=True)
+    return A, b
+
+
+def _peel_reduce_system(A: np.ndarray,
+                        b: np.ndarray) -> Tuple[bool, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Peel degree-1 equations in a binary linear system.
+
+    Returns:
+      ok,
+      fixed_assignments (len n; -1 = unresolved, else 0/1),
+      unresolved_col_idx,
+      unresolved_row_idx,
+      peel_edge_work
+    """
+    A = np.asarray(A, dtype=np.uint8).copy()
+    b = np.asarray(b, dtype=np.uint8).copy()
+
+    m, n = A.shape
+    fixed = np.full(n, -1, dtype=np.int8)
+    active_rows = np.ones(m, dtype=np.bool_)
+    active_cols = np.ones(n, dtype=np.bool_)
+
+    row_deg = A.sum(axis=1).astype(np.int32, copy=False)
+    peel_edge_work = 0
+
+    changed = True
+    while changed:
+        changed = False
+
+        # Contradiction rows (0 = 1)
+        bad_rows = np.flatnonzero(active_rows & (row_deg == 0) & (b != 0))
+        if bad_rows.size > 0:
+            return False, fixed, np.flatnonzero(active_cols), np.flatnonzero(active_rows), int(peel_edge_work)
+
+        deg1_rows = np.flatnonzero(active_rows & (row_deg == 1))
+        if deg1_rows.size == 0:
+            break
+
+        changed = True
+        for r in deg1_rows.tolist():
+            if not bool(active_rows[r]) or int(row_deg[r]) != 1:
+                continue
+
+            cols = np.flatnonzero(A[r] & active_cols)
+            if cols.size != 1:
+                continue
+            c = int(cols[0])
+
+            x = int(b[r] & 1)
+            fixed[c] = np.int8(x)
+
+            touched_rows = np.flatnonzero(A[:, c] & active_rows)
+            peel_edge_work += int(touched_rows.size)
+
+            if x != 0:
+                b[touched_rows] ^= np.uint8(1)
+
+            A[touched_rows, c] = np.uint8(0)
+            row_deg[touched_rows] -= 1
+            active_cols[c] = False
+            active_rows[r] = False
+            row_deg[r] = 0
+
+    # Final contradiction check
+    bad_rows = np.flatnonzero(active_rows & (row_deg == 0) & (b != 0))
+    if bad_rows.size > 0:
+        return False, fixed, np.flatnonzero(active_cols), np.flatnonzero(active_rows), int(peel_edge_work)
+
+    unresolved_cols = np.flatnonzero(active_cols)
+    unresolved_rows = np.flatnonzero(active_rows & (row_deg > 0))
+    return True, fixed, unresolved_cols.astype(np.int32), unresolved_rows.astype(np.int32), int(peel_edge_work)
+
+
+def _gf2_weighted_solve(A: np.ndarray,
+                        b: np.ndarray,
+                        weights: np.ndarray,
+                        max_free_enum: int = 12) -> Tuple[bool, np.ndarray, int, int]:
+    """Solve A x = b over GF(2) and choose a low-cost solution.
+
+    If the solution space has free dimension <= max_free_enum, enumerate the
+    affine nullspace and pick the minimum weighted cost solution.
+    Otherwise return failure so the caller can fall back to GRAND.
+    """
+    A = np.asarray(A, dtype=np.uint8).copy()
+    b = np.asarray(b, dtype=np.uint8).copy()
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+
+    m, n = A.shape
+    if n == 0:
+        ok = bool(np.all((b & 1) == 0))
+        return ok, np.zeros((0,), dtype=np.uint8), 0, 0
+
+    xor_ops = 0
+    row = 0
+    pivot_cols: List[int] = []
+    pivot_rows: List[int] = []
+
+    for col in range(n):
+        pivot = None
+        for r in range(row, m):
+            if int(A[r, col]) != 0:
+                pivot = r
+                break
+        if pivot is None:
+            continue
+
+        if pivot != row:
+            A[[row, pivot], :] = A[[pivot, row], :]
+            b[[row, pivot]] = b[[pivot, row]]
+
+        # Full elimination to RREF-style pivot columns
+        for r in range(m):
+            if r != row and int(A[r, col]) != 0:
+                A[r, :] ^= A[row, :]
+                b[r] ^= b[row]
+                xor_ops += int(n + 1)
+
+        pivot_cols.append(int(col))
+        pivot_rows.append(int(row))
+        row += 1
+        if row >= m:
+            break
+
+    # Inconsistency: 0 = 1
+    for r in range(m):
+        if int(A[r].sum()) == 0 and int(b[r]) != 0:
+            return False, np.zeros((n,), dtype=np.uint8), 0, int(xor_ops)
+
+    pivot_set = set(pivot_cols)
+    free_cols = [c for c in range(n) if c not in pivot_set]
+    free_dim = int(len(free_cols))
+
+    # One particular solution (free vars = 0)
+    x0 = np.zeros((n,), dtype=np.uint8)
+    for prow, pcol in zip(pivot_rows, pivot_cols):
+        x0[pcol] = np.uint8(b[prow] & 1)
+
+    if free_dim == 0:
+        return True, x0, 0, int(xor_ops)
+
+    if free_dim > int(max_free_enum):
+        return False, np.zeros((n,), dtype=np.uint8), free_dim, int(xor_ops)
+
+    pivot_row_for_col = {int(c): int(r) for r, c in zip(pivot_rows, pivot_cols)}
+    basis = []
+    for fcol in free_cols:
+        vec = np.zeros((n,), dtype=np.uint8)
+        vec[int(fcol)] = np.uint8(1)
+        for pcol in pivot_cols:
+            prow = pivot_row_for_col[int(pcol)]
+            if int(A[prow, int(fcol)]) != 0:
+                vec[int(pcol)] = np.uint8(1)
+        basis.append(vec)
+
+    best_x = x0.copy()
+    best_cost = float(np.dot(weights, best_x.astype(np.float64)))
+    best_weight = int(best_x.sum())
+
+    for mask in range(1, 1 << free_dim):
+        x = x0.copy()
+        for i in range(free_dim):
+            if (mask >> i) & 1:
+                x ^= basis[i]
+        cost = float(np.dot(weights, x.astype(np.float64)))
+        hwt = int(x.sum())
+        if (cost < best_cost - 1e-12) or (abs(cost - best_cost) <= 1e-12 and hwt < best_weight):
+            best_cost = cost
+            best_weight = hwt
+            best_x = x
+
+    return True, best_x, free_dim, int(xor_ops)
+
+
+
+def _run_presolver_peel_gf2(frame: FrameLog,
+                            sim_cfg: SimulationConfig,
+                            snapshot_iter: int,
+                            cfg: ClusterGrandConfig) -> Optional[ClusterGrandResult]:
+    """Receiver 3+ pre-solver: peel + weighted small GF(2) solve on a larger local set.
+
+    Returns:
+      - successful ClusterGrandResult if the pre-solver alone fixes the frame
+      - failed ClusterGrandResult with pre-solver metadata if it *attempted* but
+        could not certify a correction (so the caller can still charge its cost)
+      - None if the pre-solver was not applicable / not meaningfully attempted
+    """
+    code_cfg = sim_cfg.code
+
+    snaps = frame.snapshots
+    syn_snaps = snaps.get("syndrome", {})
+    hard_snaps = snaps.get("hard_bits", {})
+    llr_snaps = snaps.get("llr", {})
+
+    if (snapshot_iter not in syn_snaps or
+        snapshot_iter not in hard_snaps or
+        snapshot_iter not in llr_snaps):
+        raise ValueError(f"Snapshot at iter {snapshot_iter} is not fully available for pre-solver.")
+
+    syndrome = syn_snaps[snapshot_iter]
+    hard_bits_snapshot = hard_snaps[snapshot_iter].copy()
+    llr_snapshot = llr_snaps[snapshot_iter]
+
+    initial_syndrome_weight = int(syndrome.sum())
+    if initial_syndrome_weight == 0:
+        return None
+
+    diff_init = (hard_bits_snapshot != frame.c_bits)
+    initial_bit_errors = int(diff_init.sum())
+    unsat_checks = np.flatnonzero(syndrome).astype(np.int32)
+
+    cluster_unsat_edges = 0
+    cluster_pair_edges = 0
+    if unsat_checks.size > 0:
+        for j in unsat_checks:
+            neigh = code_cfg.checks_to_vars[int(j)]
+            d = int(neigh.size)
+            cluster_unsat_edges += d
+            if d >= 2:
+                cluster_pair_edges += int(d * (d - 1) // 2)
+
+    llr_for_sort, llr_source_used = _resolve_sort_llr_vector(
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+        cfg=cfg,
+    )
+
+    allowed_mask = build_allowed_mask_from_config(frame, sim_cfg, snapshot_iter, cfg)
+    clusters = find_variable_clusters_from_syndrome(syndrome, code_cfg)
+    if not clusters:
+        return None
+
+    union_vars = np.unique(np.concatenate(clusters)).astype(np.int32)
+    union_vars = union_vars[allowed_mask[union_vars]]
+    L_full = int(union_vars.size)
+    if L_full == 0:
+        return None
+
+    L_search = _auto_pick_grand_search_size(L_full, cfg)
+    L_peel = _auto_pick_peel_candidate_size(L_full, L_search, cfg)
+    peel_vars, front_end_meta = _select_presolver_vars(
+        union_vars=union_vars,
+        unsat_checks=unsat_checks,
+        code_cfg=code_cfg,
+        llr_for_sort=llr_for_sort,
+        L_peel=L_peel,
+        cfg=cfg,
+    )
+
+    if peel_vars.size == 0:
+        return None
+
+    # Common metadata carried on both success and attempted-failure returns
+    def _make_attempt_result(success: bool,
+                             flipped_vars: Optional[np.ndarray] = None,
+                             final_bit_errors: Optional[int] = None,
+                             peel_edge_work: int = 0,
+                             dense_xor_ops: int = 0,
+                             free_dim: int = 0,
+                             residual_vars: int = 0,
+                             residual_rows: int = 0,
+                             e_cnt: int = 0,
+                             uq_cnt: int = 0,
+                             tg_cnt: int = 0) -> ClusterGrandResult:
+        if flipped_vars is None:
+            flipped_vars = np.array([], dtype=np.int32)
+        if final_bit_errors is None:
+            final_bit_errors = int(initial_bit_errors)
+        res_local = ClusterGrandResult(
+            success=bool(success),
+            pattern_weight=int(flipped_vars.size) if bool(success) else -1,
+            flipped_vars=np.asarray(flipped_vars, dtype=np.int32),
+            patterns_tested=0,
+            initial_syndrome_weight=int(initial_syndrome_weight),
+            final_syndrome_weight=0 if bool(success) else int(initial_syndrome_weight),
+            initial_bit_errors=int(initial_bit_errors),
+            final_bit_errors=int(final_bit_errors),
+            total_v2c_edge_visits=int(e_cnt),
+            total_unique_checks_visited=int(uq_cnt),
+            total_unique_checks_toggled=int(tg_cnt),
+            patterns_generated=0,
+        )
+        setattr(res_local, "patterns_evaluated", 0)
+        setattr(res_local, "total_v2c_edge_visits_evaluated", 0)
+        setattr(res_local, "total_unique_checks_visited_evaluated", 0)
+        setattr(res_local, "total_unique_checks_toggled_evaluated", 0)
+        setattr(res_local, "union_size", int(L_full))
+        setattr(res_local, "search_size", int(L_search))
+        setattr(res_local, "llr_sort_len", int(L_full))
+        setattr(res_local, "sum_pattern_weights_generated", 0)
+        setattr(res_local, "cluster_unsat_edges", int(cluster_unsat_edges))
+        setattr(res_local, "cluster_pair_edges", int(cluster_pair_edges))
+        setattr(res_local, "num_batches_evaluated", 0)
+        setattr(res_local, "positions_packed_evaluated", 0)
+        setattr(res_local, "batch_size_used", 0)
+        setattr(res_local, "llr_source_used", str(llr_source_used))
+        setattr(res_local, "selection_mode_used", str(front_end_meta.get("selection_mode_used", getattr(cfg, "selection_mode", "llr"))))
+        setattr(res_local, "sv_seeded_count", int(front_end_meta.get("sv_seeded_count", 0)))
+        setattr(res_local, "sv_neighbor_visits", int(front_end_meta.get("sv_neighbor_visits", 0)))
+        setattr(res_local, "sv_score_len", int(front_end_meta.get("sv_score_len", L_full)))
+        setattr(res_local, "pre_solver_mode_used", "peel_gf2")
+        setattr(res_local, "pre_solver_attempted", 1)
+        setattr(res_local, "pre_solver_success", 1 if bool(success) else 0)
+        setattr(res_local, "peel_candidate_size", int(peel_vars.size))
+        setattr(res_local, "peel_residual_vars", int(residual_vars))
+        setattr(res_local, "peel_residual_rows", int(residual_rows))
+        setattr(res_local, "peel_edge_work", int(peel_edge_work))
+        setattr(res_local, "peel_dense_xor_ops", int(dense_xor_ops))
+        setattr(res_local, "peel_free_dim", int(free_dim))
+        setattr(res_local, "peel_extra_llr_added", int(front_end_meta.get("peel_extra_llr_added", 0)))
+        return res_local
+
+    A, b = _build_local_subsystem_for_candidate(
+        candidate_vars=peel_vars,
+        unsat_checks=unsat_checks,
+        code_cfg=code_cfg,
+        syndrome=syndrome,
+    )
+
+    ok_peel, fixed, unresolved_cols, unresolved_rows, peel_edge_work = _peel_reduce_system(A, b)
+    if not ok_peel:
+        return _make_attempt_result(
+            success=False,
+            peel_edge_work=int(peel_edge_work),
+            residual_vars=int(unresolved_cols.size),
+            residual_rows=int(unresolved_rows.size),
+        )
+
+    solution = np.zeros((peel_vars.size,), dtype=np.uint8)
+    fixed_mask = (fixed >= 0)
+    if np.any(fixed_mask):
+        solution[fixed_mask] = fixed[fixed_mask].astype(np.uint8, copy=False)
+
+    dense_xor_ops = 0
+    free_dim = 0
+    residual_vars = int(unresolved_cols.size)
+    residual_rows = int(unresolved_rows.size)
+
+    if residual_vars > 0:
+        dense_limit = max(0, int(getattr(cfg, "peel_dense_max_vars", 0) or 0))
+        if residual_vars > dense_limit:
+            return _make_attempt_result(
+                success=False,
+                peel_edge_work=int(peel_edge_work),
+                residual_vars=int(residual_vars),
+                residual_rows=int(residual_rows),
+            )
+
+        A_red = A[np.asarray(unresolved_rows, dtype=np.int32)][:, np.asarray(unresolved_cols, dtype=np.int32)]
+        b_red = b[np.asarray(unresolved_rows, dtype=np.int32)]
+        w_red = np.abs(llr_for_sort[peel_vars[np.asarray(unresolved_cols, dtype=np.int32)]]).astype(np.float64, copy=False)
+
+        ok_dense, x_red, free_dim, dense_xor_ops = _gf2_weighted_solve(
+            A=A_red,
+            b=b_red,
+            weights=w_red,
+            max_free_enum=int(getattr(cfg, "peel_max_free_enum", 12) or 12),
+        )
+        if not ok_dense:
+            return _make_attempt_result(
+                success=False,
+                peel_edge_work=int(peel_edge_work),
+                dense_xor_ops=int(dense_xor_ops),
+                free_dim=int(free_dim),
+                residual_vars=int(residual_vars),
+                residual_rows=int(residual_rows),
+            )
+
+        solution[np.asarray(unresolved_cols, dtype=np.int32)] = x_red.astype(np.uint8, copy=False)
+
+    flipped_vars = peel_vars[solution.astype(bool)]
+    if flipped_vars.size == 0:
+        return _make_attempt_result(
+            success=False,
+            peel_edge_work=int(peel_edge_work),
+            dense_xor_ops=int(dense_xor_ops),
+            free_dim=int(free_dim),
+            residual_vars=int(residual_vars),
+            residual_rows=int(residual_rows),
+        )
+
+    syn_w, e_cnt, uq_cnt, tg_cnt = _syndrome_weight_and_counts_after_flips_from_base(
+        base_syndrome=syndrome,
+        base_weight=int(initial_syndrome_weight),
+        flipped_vars=[int(v) for v in flipped_vars.tolist()],
+        code_cfg=code_cfg,
+    )
+    if int(syn_w) != 0:
+        return _make_attempt_result(
+            success=False,
+            peel_edge_work=int(peel_edge_work),
+            dense_xor_ops=int(dense_xor_ops),
+            free_dim=int(free_dim),
+            residual_vars=int(residual_vars),
+            residual_rows=int(residual_rows),
+        )
+
+    final_bit_errors = _bit_errors_after_flips_from_base(
+        base_bits=hard_bits_snapshot,
+        true_bits=frame.c_bits,
+        base_bit_errors=int(initial_bit_errors),
+        flipped_vars=[int(v) for v in flipped_vars.tolist()],
+    )
+
+    return _make_attempt_result(
+        success=True,
+        flipped_vars=flipped_vars.astype(np.int32, copy=False),
+        final_bit_errors=int(final_bit_errors),
+        peel_edge_work=int(peel_edge_work),
+        dense_xor_ops=int(dense_xor_ops),
+        free_dim=int(free_dim),
+        residual_vars=int(residual_vars),
+        residual_rows=int(residual_rows),
+        e_cnt=int(e_cnt),
+        uq_cnt=int(uq_cnt),
+        tg_cnt=int(tg_cnt),
+    )
+
+
+
+def run_local_rescue_with_optional_presolver(frame: FrameLog,
+                                             sim_cfg: SimulationConfig,
+                                             snapshot_iter: int,
+                                             cfg: ClusterGrandConfig) -> ClusterGrandResult:
+    """Stage-2 wrapper.
+
+    If cfg.pre_solver_mode requests a stronger Receiver-3-style pre-solver,
+    try that first; otherwise (or on failure) fall back to the existing
+    enumerative GRAND engine unchanged.
+    """
+    mode = str(getattr(cfg, "pre_solver_mode", "none") or "none").strip().lower()
+    res_pre: Optional[ClusterGrandResult] = None
+
+    if mode in ("peel_gf2", "receiver3", "ptg"):
+        res_pre = _run_presolver_peel_gf2(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if (res_pre is not None) and bool(res_pre.success):
+            return res_pre
+
+    res = run_local_grand_on_union_of_clusters(
+        frame=frame,
+        sim_cfg=sim_cfg,
+        snapshot_iter=snapshot_iter,
+        cfg=cfg,
+    )
+
+    # Attach "attempted but fell back" metadata when a pre-solver mode was enabled.
+    if (mode in ("peel_gf2", "receiver3", "ptg")) and (res_pre is not None):
+        for attr in [
+            "pre_solver_mode_used",
+            "pre_solver_attempted",
+            "pre_solver_success",
+            "peel_candidate_size",
+            "peel_residual_vars",
+            "peel_residual_rows",
+            "peel_edge_work",
+            "peel_dense_xor_ops",
+            "peel_free_dim",
+            "peel_extra_llr_added",
+        ]:
+            if hasattr(res_pre, attr):
+                setattr(res, attr, getattr(res_pre, attr))
+    elif mode in ("peel_gf2", "receiver3", "ptg"):
+        setattr(res, "pre_solver_mode_used", mode)
+        setattr(res, "pre_solver_attempted", 1)
+        setattr(res, "pre_solver_success", 0)
+
+    return res
+
+
 def run_local_grand_on_union_of_clusters(frame: FrameLog,
                                          sim_cfg: SimulationConfig,
                                          snapshot_iter: int,
@@ -2378,24 +3019,12 @@ def run_local_grand_on_union_of_clusters(frame: FrameLog,
     diff_init = (hard_bits_snapshot != frame.c_bits)
     initial_bit_errors = int(diff_init.sum())
 
-    # ---- LLR source selection (posterior vs channel) ----
-    llr_source_used = "posterior"
-    llr_for_sort = llr_snapshot
-
-    llr_source = str(getattr(cfg, "llr_source", "posterior") or "posterior").strip().lower()
-    if llr_source == "channel":
-        if getattr(frame, "llr_channel", None) is not None:
-            llr_for_sort = frame.llr_channel
-            llr_source_used = "channel"
-        else:
-            llr_for_sort = llr_snapshot
-            llr_source_used = "posterior"
-    elif llr_source == "posterior":
-        llr_for_sort = llr_snapshot
-        llr_source_used = "posterior"
-    else:
-        llr_for_sort = llr_snapshot
-        llr_source_used = "posterior"
+    # ---- LLR source selection (posterior vs channel vs mixed) ----
+    llr_for_sort, llr_source_used = _resolve_sort_llr_vector(
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+        cfg=cfg,
+    )
 
     # ---- Cluster-complexity proxy counters from the snapshot syndrome ----
     #   cluster_unsat_edges: total degree sum over unsatisfied checks
@@ -3005,6 +3634,68 @@ grand_cfg_awgn_sv_boost = ClusterGrandConfig(
     sv_epsilon=_get_float_env("GRAND_SV_EPSILON", 1e-3),
     sv_check_cover_k=_get_int_env("GRAND_SV_CHECK_COVER_K", 1),
 )
+# ---- Receiver 3+: syndrome-vote front-end + peel/weighted-GF(2) pre-solver ----
+RUN_RECEIVER3 = bool(_get_int_env("RUN_RECEIVER3", 0))
+GRAND_PTG_USE_BOOST = bool(_get_int_env("GRAND_PTG_USE_BOOST", _get_int_env("GRAND_SV_USE_BOOST", _get_int_env("GRAND_USE_BOOST", 1))))
+
+grand_cfg_awgn_ptg = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_PTG_MAX_WEIGHT", _get_int_env("GRAND_SV_MAX_WEIGHT", _get_int_env("GRAND_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_PTG_MAX_PATTERNS", _get_int_env("GRAND_SV_MAX_PATTERNS", _get_int_env("GRAND_MAX_PATTERNS", 5000))),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_PTG_LLR_SOURCE",
+        os.environ.get("GRAND_SV_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_PTG_OVERGEN",
+        _get_float_env("GRAND_SV_OVERGEN", _get_float_env("GRAND_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_PTG_BATCH_SIZE", _get_int_env("GRAND_SV_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_PTG_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3)),
+    sv_check_cover_k=_get_int_env("GRAND_PTG_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 1)),
+    pre_solver_mode="peel_gf2",
+    peel_candidate_ratio=_get_float_env("GRAND_PTG_PEEL_RATIO", 1.75),
+    peel_max_bits=_get_int_env("GRAND_PTG_PEEL_MAX_BITS", 48),
+    peel_dense_max_vars=_get_int_env("GRAND_PTG_PEEL_DENSE_MAX_VARS", 28),
+    peel_max_free_enum=_get_int_env("GRAND_PTG_PEEL_MAX_FREE_ENUM", 12),
+    peel_extra_llr_bits=_get_int_env("GRAND_PTG_PEEL_EXTRA_LLR_BITS", 8),
+)
+
+grand_cfg_awgn_ptg_boost = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_PTG_BOOST_MAX_WEIGHT", _get_int_env("GRAND_SV_BOOST_MAX_WEIGHT", _get_int_env("GRAND_BOOST_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_PTG_BOOST_MAX_PATTERNS", _get_int_env("GRAND_SV_BOOST_MAX_PATTERNS", _get_int_env("GRAND_BOOST_MAX_PATTERNS", 15000))),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_PTG_LLR_SOURCE",
+        os.environ.get("GRAND_SV_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_PTG_BOOST_OVERGEN",
+        _get_float_env("GRAND_SV_BOOST_OVERGEN", _get_float_env("GRAND_BOOST_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_PTG_BATCH_SIZE", _get_int_env("GRAND_SV_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_PTG_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3)),
+    sv_check_cover_k=_get_int_env("GRAND_PTG_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 1)),
+    pre_solver_mode="none",  # avoid repeating the same pre-solver on the boost path
+    peel_candidate_ratio=_get_float_env("GRAND_PTG_PEEL_RATIO", 1.75),
+    peel_max_bits=_get_int_env("GRAND_PTG_PEEL_MAX_BITS", 48),
+    peel_dense_max_vars=_get_int_env("GRAND_PTG_PEEL_DENSE_MAX_VARS", 28),
+    peel_max_free_enum=_get_int_env("GRAND_PTG_PEEL_MAX_FREE_ENUM", 12),
+    peel_extra_llr_bits=_get_int_env("GRAND_PTG_PEEL_EXTRA_LLR_BITS", 8),
+)
+# ======================================================================
+
+
+
+
+
+
 # ======================================================================
 
 
@@ -3228,10 +3919,21 @@ def grand_hw_cycles_from_result(
     if selection_mode_used in ("syndrome_vote", "sv", "receiver2"):
         cycles += _ceil_div(sv_score_len, add_pc)
 
-    # (4) Pattern cost computation: total number of |LLR| terms summed
+    # (4) Receiver-3-style pre-solver cost (if enabled)
+    peel_candidate_size = int(getattr(result, "peel_candidate_size", 0))
+    peel_edge_work = int(getattr(result, "peel_edge_work", 0))
+    peel_dense_xor_ops = int(getattr(result, "peel_dense_xor_ops", 0))
+    if peel_candidate_size > 0:
+        cycles += _ceil_div(peel_candidate_size, abs_pc)   # extra reliability work on V_peel
+    if peel_edge_work > 0:
+        cycles += _ceil_div(peel_edge_work, epc)
+    if peel_dense_xor_ops > 0:
+        cycles += _ceil_div(peel_dense_xor_ops, add_pc)
+
+    # (5) Pattern cost computation: total number of |LLR| terms summed
     cycles += _ceil_div(sumw_gen, add_pc)
 
-    # (5) Pattern ordering sort: O(P log2 P)
+    # (6) Pattern ordering sort: O(P log2 P)
     cycles += _ceil_div(patterns_gen * _safe_log2_int(patterns_gen), psort_pc)
 
     # (6) Packing overhead proxy: sum of weights of evaluated patterns
@@ -3527,6 +4229,13 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_cluster_unsat_edges = []
     per_frame_cluster_pair_edges = []
 
+    # Optional Receiver-3/pre-solver logs
+    per_frame_pre_solver_attempted = []
+    per_frame_pre_solver_success = []
+    per_frame_peel_candidate_size = []
+    per_frame_peel_residual_vars = []
+    per_frame_peel_dense_xor_ops = []
+
     n_frames = 0
     frame_id = 0
 
@@ -3583,12 +4292,16 @@ def run_hybrid_ldpc_grand_adaptive(
         cu_e = 0
         cu_p = 0
 
-
+        ps_attempt = 0
+        ps_success = 0
+        peel_cand = 0
+        peel_res_vars = 0
+        peel_xor = 0
 
         # ---- Stage-2 GRAND ----
         if stage1_failed:
             try:
-                res = run_local_grand_on_union_of_clusters(
+                res = run_local_rescue_with_optional_presolver(
                     frame=frame,
                     sim_cfg=sim_cfg,
                     snapshot_iter=int(snapshot_iter),
@@ -3608,7 +4321,7 @@ def run_hybrid_ldpc_grand_adaptive(
 
                 if exhausted:
                     try:
-                        res2 = run_local_grand_on_union_of_clusters(
+                        res2 = run_local_rescue_with_optional_presolver(
                             frame=frame,
                             sim_cfg=sim_cfg,
                             snapshot_iter=int(snapshot_iter),
@@ -3672,6 +4385,12 @@ def run_hybrid_ldpc_grand_adaptive(
                 cu_e = int(getattr(res, "cluster_unsat_edges", 0))
                 cu_p = int(getattr(res, "cluster_pair_edges", 0))
 
+                # Optional Receiver-3 / pre-solver metadata
+                ps_attempt = int(getattr(res, "pre_solver_attempted", 0))
+                ps_success = int(getattr(res, "pre_solver_success", 0))
+                peel_cand = int(getattr(res, "peel_candidate_size", 0))
+                peel_res_vars = int(getattr(res, "peel_residual_vars", 0))
+                peel_xor = int(getattr(res, "peel_dense_xor_ops", 0))
 
         # ---- Accumulate final stats ----
         total_bit_errs_after += be_after
@@ -3702,6 +4421,12 @@ def run_hybrid_ldpc_grand_adaptive(
 
         per_frame_cluster_unsat_edges.append(cu_e)
         per_frame_cluster_pair_edges.append(cu_p)
+
+        per_frame_pre_solver_attempted.append(ps_attempt)
+        per_frame_pre_solver_success.append(ps_success)
+        per_frame_peel_candidate_size.append(peel_cand)
+        per_frame_peel_residual_vars.append(peel_res_vars)
+        per_frame_peel_dense_xor_ops.append(peel_xor)
 
         n_frames += 1
         frame_id += 1
@@ -3807,11 +4532,21 @@ def run_hybrid_ldpc_grand_adaptive(
         "per_frame_cluster_unsat_edges": np.array(per_frame_cluster_unsat_edges, dtype=np.int64),
         "per_frame_cluster_pair_edges": np.array(per_frame_cluster_pair_edges, dtype=np.int64),
 
+        # Optional Receiver-3 / pre-solver logs
+        "per_frame_pre_solver_attempted": np.array(per_frame_pre_solver_attempted, dtype=np.int8),
+        "per_frame_pre_solver_success": np.array(per_frame_pre_solver_success, dtype=np.int8),
+        "per_frame_peel_candidate_size": np.array(per_frame_peel_candidate_size, dtype=np.int32),
+        "per_frame_peel_residual_vars": np.array(per_frame_peel_residual_vars, dtype=np.int32),
+        "per_frame_peel_dense_xor_ops": np.array(per_frame_peel_dense_xor_ops, dtype=np.int64),
+
         # Stage-2 configuration (kept in the raw pickle; CSV summaries stay unchanged)
         "grand_selection_mode": str(getattr(grand_cfg, "selection_mode", "llr")),
         "grand_llr_source": str(getattr(grand_cfg, "llr_source", "posterior")),
         "grand_sv_check_cover_k": int(getattr(grand_cfg, "sv_check_cover_k", 0)),
         "grand_sv_epsilon": float(getattr(grand_cfg, "sv_epsilon", 0.0)),
+        "grand_pre_solver_mode": str(getattr(grand_cfg, "pre_solver_mode", "none")),
+        "grand_peel_candidate_ratio": float(getattr(grand_cfg, "peel_candidate_ratio", 1.0)),
+        "grand_peel_max_bits": int(getattr(grand_cfg, "peel_max_bits", 0) or 0),
 
         "hw_model": asdict(hw_model),
     }
@@ -3967,6 +4702,11 @@ def save_awgn_results(
         # GRAND pattern stats conditional on GRAND invoked (stage1_failed==True)
         "patterns_tested_mean_if_grand", "patterns_tested_p95_if_grand", "patterns_tested_p99_if_grand", "patterns_tested_max_if_grand",
         "patterns_evaluated_mean_if_grand", "patterns_evaluated_p95_if_grand", "patterns_evaluated_p99_if_grand", "patterns_evaluated_max_if_grand",
+
+        # Optional Receiver-3 / pre-solver tails
+        "pre_solver_attempt_rate", "pre_solver_success_rate_total", "pre_solver_success_rate_if_attempted",
+        "peel_candidate_mean", "peel_candidate_p95", "peel_candidate_max",
+        "peel_residual_vars_mean", "peel_residual_vars_p95", "peel_residual_vars_max",
     ]
 
     with open(tails_path, "w", newline="") as fcsv:
@@ -4019,6 +4759,16 @@ def save_awgn_results(
                     row["grand_cycles_p95"]  = 0.0
                     row["grand_cycles_p99"]  = 0.0
                     row["grand_cycles_max"]  = 0.0
+
+                    row["pre_solver_attempt_rate"] = 0.0
+                    row["pre_solver_success_rate_total"] = 0.0
+                    row["pre_solver_success_rate_if_attempted"] = np.nan
+                    row["peel_candidate_mean"] = 0.0
+                    row["peel_candidate_p95"] = 0.0
+                    row["peel_candidate_max"] = 0.0
+                    row["peel_residual_vars_mean"] = 0.0
+                    row["peel_residual_vars_p95"] = 0.0
+                    row["peel_residual_vars_max"] = 0.0
 
                 else:
                     n_frames = int(stats.get("n_frames", 0))
@@ -4101,6 +4851,37 @@ def save_awgn_results(
                     row["patterns_evaluated_p95_if_grand"]  = pe_if_s["p95"]
                     row["patterns_evaluated_p99_if_grand"]  = pe_if_s["p99"]
                     row["patterns_evaluated_max_if_grand"]  = pe_if_s["max"]
+
+                    # Optional Receiver-3 / pre-solver tails
+                    ps_attempt = np.asarray(stats.get("per_frame_pre_solver_attempted", []), dtype=np.int8)
+                    ps_success = np.asarray(stats.get("per_frame_pre_solver_success", []), dtype=np.int8)
+                    peel_cand = np.asarray(stats.get("per_frame_peel_candidate_size", []), dtype=np.int64)
+                    peel_resv = np.asarray(stats.get("per_frame_peel_residual_vars", []), dtype=np.int64)
+
+                    if ps_attempt.size > 0:
+                        row["pre_solver_attempt_rate"] = float(ps_attempt.mean())
+                    else:
+                        row["pre_solver_attempt_rate"] = np.nan
+
+                    if ps_success.size > 0:
+                        row["pre_solver_success_rate_total"] = float(ps_success.mean())
+                    else:
+                        row["pre_solver_success_rate_total"] = np.nan
+
+                    if ps_attempt.size > 0 and ps_success.size == ps_attempt.size and int(ps_attempt.sum()) > 0:
+                        row["pre_solver_success_rate_if_attempted"] = float(ps_success[ps_attempt.astype(bool)].mean())
+                    else:
+                        row["pre_solver_success_rate_if_attempted"] = np.nan
+
+                    peel_cand_s = _dist_stats(peel_cand)
+                    row["peel_candidate_mean"] = peel_cand_s["mean"]
+                    row["peel_candidate_p95"]  = peel_cand_s["p95"]
+                    row["peel_candidate_max"]  = peel_cand_s["max"]
+
+                    peel_resv_s = _dist_stats(peel_resv)
+                    row["peel_residual_vars_mean"] = peel_resv_s["mean"]
+                    row["peel_residual_vars_p95"]  = peel_resv_s["p95"]
+                    row["peel_residual_vars_max"]  = peel_resv_s["max"]
 
                 writer.writerow(row)
 
@@ -4580,6 +5361,7 @@ def run_awgn_sweep_for_code(
 
     base_seed = _env_int("RNG_SEED_GLOBAL", 12345) + _stable_u32_seed_from_string(code_cfg.code_name)
     run_receiver2 = bool(_env_int("RUN_RECEIVER2", 0))
+    run_receiver3 = bool(_env_int("RUN_RECEIVER3", 0))
 
     results: Dict[float, Dict[str, Any]] = {}
 
@@ -4681,6 +5463,32 @@ def run_awgn_sweep_for_code(
                     rng_seed=seed,
                     label=dec_name,
                     grand_cfg_boost=(grand_cfg_awgn_sv_boost if GRAND_SV_USE_BOOST else None),
+                )
+
+        # Scenario 5: Receiver 3+ (syndrome-vote + peel/weighted-GF(2) pre-solver + GRAND fallback)
+        if run_receiver3:
+            for it in stage1_list:
+                dec_name = f"hybptg{int(it)}"
+                seed = int((base_seed + 30_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
+
+                sim_cfg_hyb = SimulationConfig(
+                    code=code_cfg,
+                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
+                    interleaver=interleaver,
+                    rng_seed_global=int(base_seed),
+                    snapshot_iters=[int(it)],
+                )
+
+                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
+                    sim_cfg=sim_cfg_hyb,
+                    dec_cfg_stage1=dec_cfg,
+                    grand_cfg=grand_cfg_awgn_ptg,
+                    snapshot_iter=int(it),
+                    mc_cfg=mc_cfg_local,
+                    rng_seed=seed,
+                    label=dec_name,
+                    grand_cfg_boost=(grand_cfg_awgn_ptg_boost if GRAND_PTG_USE_BOOST else None),
                 )
 
         return snr_db, per_snr
