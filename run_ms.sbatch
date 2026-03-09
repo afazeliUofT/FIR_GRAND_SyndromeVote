@@ -2,7 +2,7 @@
 
 # ===== Slurm resources =====
 # NOTE: You can override these at submission time if needed.
-#SBATCH --time=12:00:00
+#SBATCH --time=6:00:00
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=0
 #SBATCH --output=logs/%x-%j.out
