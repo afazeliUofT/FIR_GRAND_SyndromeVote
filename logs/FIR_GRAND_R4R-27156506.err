@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 153, in <module>
+    _main()
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 149, in _main
+    exec(compile(wrapper_src, str(REPO_ROOT / REL_PATH), "exec"), glb, glb)
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 111, in <module>
+    if base_ref is None and _looks_like_base_source(src):
+                  ^^^^^^^^^^^^^^^^^^^
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 107, in _load_base_module
+    src = _git_try_show(refspec)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 198, in <module>
+  File "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/lib/python3.11/dataclasses.py", line 1230, in dataclass
+    return wrap(cls)
+           ^^^^^^^^^
+  File "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/lib/python3.11/dataclasses.py", line 1220, in wrap
+    return _process_class(cls, init, repr, eq, order, unsafe_hash,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/lib/python3.11/dataclasses.py", line 947, in _process_class
+    and _is_type(type, cls, dataclasses, dataclasses.KW_ONLY,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/lib/python3.11/dataclasses.py", line 712, in _is_type
+    ns = sys.modules.get(cls.__module__).__dict__
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute '__dict__'. Did you mean: '__dir__'?
