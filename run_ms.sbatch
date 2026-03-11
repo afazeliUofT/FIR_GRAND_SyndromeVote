@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=0
-#SBATCH --time=12:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 ## If your cluster/account requires it, uncomment and set:
