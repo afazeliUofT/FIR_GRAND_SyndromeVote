@@ -2,24 +2,24 @@
 Receiver-4R launcher drop-in for FIR_GRAND_SyndromeVote.
 
 This file replaces HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py.
-It bootstraps the actual Receiver-4R wrapper from the local git history and
-pins that wrapper to a non-wrapper historical base revision of the same file.
+It bootstraps the historical Receiver-4R wrapper from the local git history,
+pins that wrapper to a historical non-wrapper base revision of the same file,
+and hot-patches the wrapper's dynamic module loading so it works on Python 3.13.
 
-Why this launcher exists:
-- The previous Receiver-4R wrapper on main expects to find a non-wrapper base
-  version of HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py via git refs like
-  HEAD/origin/main/HEAD~1.
-- After the wrapper itself was committed to main, those refs can all point to
-  wrapper revisions, so the wrapper can no longer find a non-wrapper base and
-  aborts at startup.
-- This launcher scans the file history, finds:
-    (a) the newest historical Receiver-4R wrapper revision, and
-    (b) the newest historical non-wrapper base revision,
-  then sets BASE_GIT_REF to the base revision and execs the wrapper revision.
+Why this exists:
+- The historical Receiver-4R wrapper expects a non-wrapper base revision of the
+  same file to be reachable via git refs.
+- After wrapper revisions were committed on top, HEAD/origin/main can all point
+  to wrapper/launcher revisions instead of the original base.
+- The previous launcher fixed that lookup problem, but the wrapper still creates
+  a synthetic module for the base script without registering it in sys.modules.
+  On Python 3.13 this breaks dataclass processing while importing the base.
 
-Assumptions:
-- This directory is a git clone with local history for this file.
-- The repository history still contains the earlier non-wrapper base revisions.
+This launcher therefore does three things:
+1) Finds a wrapper revision from local git history.
+2) Finds a non-wrapper base revision from local git history.
+3) Patches the wrapper source in-memory to register the synthetic base module
+   in sys.modules before executing it.
 """
 
 from __future__ import annotations
@@ -82,15 +82,14 @@ def _looks_like_wrapper_source(src: Optional[str]) -> bool:
 
 def _pick_wrapper_and_base() -> Tuple[str, str, str]:
     commits = _list_file_history()
-
     candidate_refs = [f"{sha}:{REL_PATH}" for sha in commits]
 
-    # Explicit fallbacks from the observed repository history.
+    # Known repository revisions observed in the public history.
     for sha in [
-        "4e59ddb",  # wrapper update on Mar 11, 2026
-        "37aad60",  # later repo commit
-        "98f6431",  # sbatch update
-        "37bf246",  # receiver3plus / non-wrapper base
+        "4e59ddb",  # historical Receiver-4R wrapper
+        "37aad60",  # current launcher commit
+        "98f6431",  # updated sbatch commit
+        "37bf246",  # strong non-wrapper receiver2/3 base
         "6ae98a3",
         "a20d377",
         "74080c3",
@@ -132,13 +131,50 @@ def _resolve_base_git_ref(auto_base_ref: str) -> str:
     return auto_base_ref
 
 
+def _patch_wrapper_source(wrapper_src: str) -> Tuple[str, bool]:
+    """
+    Patch the historical wrapper so its dynamic base-module loader registers
+    the synthetic module in sys.modules before exec(). This is required for
+    Python 3.13 dataclass processing.
+    """
+    if 'sys.modules[mod.__name__] = mod' in wrapper_src:
+        return wrapper_src, False
+
+    old = '''def _load_base_module() -> Tuple[types.ModuleType, str]:
+    src, refspec = _load_base_source()
+    mod = types.ModuleType("fir_grand_base")
+    mod.__file__ = str(_repo_root() / _this_relpath())
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod, refspec
+'''
+
+    new = '''def _load_base_module() -> Tuple[types.ModuleType, str]:
+    src, refspec = _load_base_source()
+    mod = types.ModuleType("fir_grand_base")
+    mod.__file__ = str(_repo_root() / _this_relpath())
+    sys.modules[mod.__name__] = mod
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod, refspec
+'''
+
+    if old in wrapper_src:
+        return wrapper_src.replace(old, new, 1), True
+
+    raise RuntimeError(
+        "Could not patch the historical Receiver-4R wrapper in-memory. "
+        "Its _load_base_module() body no longer matches the expected pattern."
+    )
+
+
 def _main() -> None:
     wrapper_ref, wrapper_src, auto_base_ref = _pick_wrapper_and_base()
     base_ref = _resolve_base_git_ref(auto_base_ref)
+    wrapper_src, patched = _patch_wrapper_source(wrapper_src)
 
     print(f"[Receiver-4R launcher] repo_root={REPO_ROOT}")
     print(f"[Receiver-4R launcher] wrapper_ref={wrapper_ref}")
     print(f"[Receiver-4R launcher] BASE_GIT_REF={base_ref}")
+    print(f"[Receiver-4R launcher] wrapper_patched_sys_modules={int(patched)}")
 
     glb = {
         "__file__": str(REPO_ROOT / REL_PATH),
