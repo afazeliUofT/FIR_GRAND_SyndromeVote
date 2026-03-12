@@ -7,8 +7,7 @@
 #SBATCH --time=8:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
-## If your cluster/account requires it, uncomment and set:
-## #SBATCH --account=<your_account>
+#SBATCH --account=def-rsadve
 
 set -euo pipefail
 
@@ -43,9 +42,6 @@ export LDPC_GRAND_NUM_THREADS=${LDPC_GRAND_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-6
 export RUN_EXPERIMENTS=${RUN_EXPERIMENTS:-1}
 export RUN_CODES=${RUN_CODES:-sionna5g}
 export RESULTS_DIR=${RESULTS_DIR:-"$REPO_ROOT/results/run_ms.sbatch_${SLURM_JOB_ID:-manual}"}
-
-# Explicit historical base pin for the Receiver-4R launcher / wrapper chain.
-export BASE_GIT_REF=${BASE_GIT_REF:-37bf246:HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py}
 
 # SNR-parallel plan
 export PARALLEL_OVER_SNR=${PARALLEL_OVER_SNR:-1}
@@ -178,7 +174,6 @@ export GRAND_RR_BOOST_RESTART_BIAS_OFFSET=${GRAND_RR_BOOST_RESTART_BIAS_OFFSET:-
 export GRAND_RR_BOOST_RESTART_FORCE_ABS=${GRAND_RR_BOOST_RESTART_FORCE_ABS:-10.0}
 
 echo "[SBATCH CONFIG] RESULTS_DIR=${RESULTS_DIR}"
-echo "[SBATCH CONFIG] BASE_GIT_REF=${BASE_GIT_REF}"
 echo "[SBATCH CONFIG] SNR_SWEEP=${SNR_SWEEP}"
 echo "[SBATCH CONFIG] LDPC_ITERS=${LDPC_ITERS}"
 echo "[SBATCH CONFIG] STAGE1_ITERS=${STAGE1_ITERS}"
