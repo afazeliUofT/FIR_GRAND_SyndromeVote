@@ -536,6 +536,65 @@ def _llr_bpsk_known_h(y: np.ndarray, h: np.ndarray, no: float) -> np.ndarray:
     return (4.0 / float(no)) * np.real(np.conj(h) * y).astype(np.float32)
 
 
+def _estimate_h_for_llr(y: np.ndarray,
+                        h_true: np.ndarray,
+                        no: float) -> Tuple[np.ndarray, str]:
+    """Resolve the channel estimate used for LLR generation.
+
+    Modes:
+      - perfect : use the exact per-RE channel
+      - block_ls: sparse-pilot / block-held LS approximation over the flattened
+                  OFDM resource grid. This is a lightweight 5G-compatible proxy
+                  for imperfect CSI without requiring a full DMRS resource-grid
+                  implementation in this script.
+    """
+    mode = str(os.getenv("SIONNA_CSI_MODE", "perfect") or "perfect").strip().lower()
+    h_true = np.asarray(h_true, dtype=np.complex64)
+    y = np.asarray(y, dtype=np.complex64)
+
+    if mode in ("", "perfect", "ideal", "known_h", "true"):
+        return h_true, "perfect"
+
+    if mode in ("block_ls", "pilot_hold", "coarse", "coarse_ls"):
+        n = int(y.size)
+        if n <= 0:
+            return h_true, "perfect"
+
+        stride = max(1, int(float(os.getenv("SIONNA_CSI_PILOT_STRIDE", os.getenv("SIONNA_CSI_BLOCK_SC", "12")))))
+        smooth = max(1, int(float(os.getenv("SIONNA_CSI_SMOOTH_PILOTS", "1"))))
+        pilot_idx = np.arange(0, n, stride, dtype=np.int32)
+        if pilot_idx.size == 0:
+            pilot_idx = np.array([0], dtype=np.int32)
+
+        # LS on sparse pilot REs (x=+1 for all-zero CW under BPSK)
+        h_p = y[pilot_idx].astype(np.complex64, copy=True)
+
+        est_snr_db_str = str(os.getenv("SIONNA_CSI_EST_SNR_DB", "")).strip()
+        if est_snr_db_str:
+            try:
+                est_snr_db = float(est_snr_db_str)
+                est_var = 10.0 ** (-est_snr_db / 10.0)
+                rng = np.random.default_rng(int(np.abs(np.sum(np.real(y[:min(32, n)]))) * 1e6) % (2**32 - 1))
+                z = (rng.standard_normal(h_p.shape).astype(np.float32)
+                     + 1j * rng.standard_normal(h_p.shape).astype(np.float32)) * np.sqrt(est_var / 2.0)
+                h_p = (h_p + z.astype(np.complex64)).astype(np.complex64)
+            except Exception:
+                pass
+
+        if smooth > 1 and h_p.size > 1:
+            win = min(int(smooth), int(h_p.size))
+            kernel = np.ones(win, dtype=np.float32) / float(win)
+            h_p = (np.convolve(h_p.real, kernel, mode="same")
+                   + 1j * np.convolve(h_p.imag, kernel, mode="same")).astype(np.complex64)
+
+        xi = np.arange(n, dtype=np.float32)
+        h_hat = (np.interp(xi, pilot_idx.astype(np.float32), h_p.real.astype(np.float32))
+                 + 1j * np.interp(xi, pilot_idx.astype(np.float32), h_p.imag.astype(np.float32))).astype(np.complex64)
+        return h_hat, "block_ls"
+
+    return h_true, "perfect"
+
+
 def run_single_frame_sionna5g(sim_cfg: SimulationConfig, frame_id: int, global_rng: np.random.Generator) -> FrameLog:
     """Single-frame runner for Sionna 5G NR LDPC codes.
 
@@ -565,11 +624,13 @@ def run_single_frame_sionna5g(sim_cfg: SimulationConfig, frame_id: int, global_r
 
     if ch_name in ("SIONNA_TDL", "TDL"):
         y_c, h_c, no = sionna_tdl_ofdm_siso_bpsk(n_tx, sim_cfg.channel.snr_db, rng)
-        llr_tx = _llr_bpsk_known_h(y_c, h_c, no)
+        h_llr, csi_mode_used = _estimate_h_for_llr(y_c, h_c, no)
+        llr_tx = _llr_bpsk_known_h(y_c, h_llr, no)
         y_tx = y_c  # complex
         channel_realization.update({
             "no": np.array([no], dtype=np.float64),
-            "tdl_model": os.getenv("SIONNA_TDL_MODEL", "A"),
+            "tdl_model": np.array([str(os.getenv("SIONNA_TDL_MODEL", "A"))]),
+            "csi_mode": np.array([str(csi_mode_used)]),
         })
     else:
         raise ValueError(
@@ -1536,12 +1597,22 @@ class ClusterGrandConfig:
     sv_check_cover_k: int = 0              # k_cc ; 0 disables check-cover seeding
 
     # Receiver 3 / stronger pre-solver knobs
-    pre_solver_mode: str = "none"          # "none" or "peel_gf2"
+    pre_solver_mode: str = "none"          # "none", "peel_gf2", or "chase_list"
     peel_candidate_ratio: float = 1.50     # L_peel ~= ratio * L_search
     peel_max_bits: Optional[int] = None    # hard cap on peel candidate size
     peel_dense_max_vars: int = 32          # exact weighted GF(2) solve only if residual vars <= this
     peel_max_free_enum: int = 12           # enumerate weighted nullspace only if free dimension <= this
     peel_extra_llr_bits: int = 0           # add this many plain-LLR candidates to the peel set
+
+    # Receiver 4 / Chase-list + short-LDPC post-processing knobs
+    chase_candidate_ratio: float = 2.25    # L_chase ~= ratio * L_search
+    chase_max_bits: Optional[int] = None   # hard cap on chase candidate size
+    chase_core_max_bits: int = 12          # enumerate patterns only on the top-ranked core
+    chase_max_weight: int = 3              # Chase pattern weight cap on that core
+    chase_max_candidates: int = 96         # number of ranked candidates to try with short LDPC
+    chase_ldpc_extra_iters: int = 6        # short polishing pass per Chase candidate
+    chase_llr_gain: float = 2.5            # force candidate hypothesis with this |LLR| multiplier
+    chase_llr_abs_floor: float = 4.0       # minimum |LLR| used when forcing candidate bits
 
 
 
@@ -2660,6 +2731,375 @@ def _gf2_weighted_solve(A: np.ndarray,
     return True, best_x, free_dim, int(xor_ops)
 
 
+def _auto_pick_chase_candidate_size(L_full: int,
+                                    L_search: int,
+                                    cfg: ClusterGrandConfig) -> int:
+    """Choose L_chase >= L_search, capped by chase_max_bits / L_full."""
+    L_full = int(max(L_full, 0))
+    L_search = int(max(L_search, 0))
+    if L_full <= 0:
+        return 0
+
+    ratio = float(getattr(cfg, "chase_candidate_ratio", 1.0) or 1.0)
+    ratio = max(1.0, ratio)
+    L_chase = int(np.ceil(ratio * max(L_search, 1)))
+
+    chase_max_bits = getattr(cfg, "chase_max_bits", None)
+    if isinstance(chase_max_bits, int) and chase_max_bits > 0:
+        L_chase = min(L_chase, int(chase_max_bits))
+
+    L_chase = max(L_chase, max(L_search, 1))
+    return int(min(L_chase, L_full))
+
+
+def _enumerate_ranked_local_patterns(core_vars: np.ndarray,
+                                     llr_for_sort: np.ndarray,
+                                     base_syndrome: np.ndarray,
+                                     base_weight: int,
+                                     code_cfg: CodeConfig,
+                                     max_weight: int,
+                                     max_candidates: int) -> Tuple[List[Tuple[int, float, int, Tuple[int, ...], int, int, int]], Dict[str, int]]:
+    """Enumerate Chase-style local patterns and rank them by post-flip syndrome."""
+    core_vars = np.asarray(core_vars, dtype=np.int32)
+    L = int(core_vars.size)
+    max_weight = int(max(1, max_weight))
+    max_candidates = int(max(1, max_candidates))
+
+    if L <= 0:
+        return [], {
+            "chase_patterns_considered": 0,
+            "chase_score_edge_visits": 0,
+            "chase_score_checks_toggled": 0,
+            "chase_score_sum_pattern_weights": 0,
+        }
+
+    abs_llr = np.abs(llr_for_sort[core_vars]).astype(np.float64, copy=False)
+    patterns: List[Tuple[int, float, int, Tuple[int, ...], int, int, int]] = []
+    score_edge_visits = 0
+    score_checks_toggled = 0
+    score_sumw = 0
+
+    for w in range(1, min(max_weight, L) + 1):
+        for comb in itertools.combinations(range(L), w):
+            flip_vars = tuple(int(core_vars[i]) for i in comb)
+            syn_w, e_cnt, uq_cnt, tg_cnt = _syndrome_weight_and_counts_after_flips_from_base(
+                base_syndrome=base_syndrome,
+                base_weight=int(base_weight),
+                flipped_vars=list(flip_vars),
+                code_cfg=code_cfg,
+            )
+            cost = float(sum(float(abs_llr[i]) for i in comb))
+            patterns.append((int(syn_w), float(cost), int(w), flip_vars, int(e_cnt), int(uq_cnt), int(tg_cnt)))
+            score_edge_visits += int(e_cnt)
+            score_checks_toggled += int(tg_cnt)
+            score_sumw += int(w)
+
+    patterns.sort(key=lambda t: (int(t[0]), float(t[1]), int(t[2]), tuple(t[3])))
+    if len(patterns) > max_candidates:
+        patterns = patterns[:max_candidates]
+
+    return patterns, {
+        "chase_patterns_considered": int(len(patterns)),
+        "chase_score_edge_visits": int(score_edge_visits),
+        "chase_score_checks_toggled": int(score_checks_toggled),
+        "chase_score_sum_pattern_weights": int(score_sumw),
+    }
+
+
+def _make_chase_biased_llr(base_llr_channel: np.ndarray,
+                           llr_snapshot: np.ndarray,
+                           hard_bits_snapshot: np.ndarray,
+                           flipped_vars: np.ndarray,
+                           gain: float,
+                           abs_floor: float) -> np.ndarray:
+    """Force a local Chase hypothesis into the channel LLR vector."""
+    llr_base = np.asarray(base_llr_channel, dtype=np.float32)
+    llr_snapshot = np.asarray(llr_snapshot, dtype=np.float32)
+    out = llr_base.astype(np.float32, copy=True)
+
+    flipped_vars = np.asarray(flipped_vars, dtype=np.int32)
+    if flipped_vars.size == 0:
+        return out
+
+    mags = np.maximum(np.abs(llr_base[flipped_vars]), np.abs(llr_snapshot[flipped_vars])).astype(np.float32, copy=False)
+    mags = np.maximum(mags, float(abs_floor)).astype(np.float32, copy=False)
+    target_bits = np.asarray(hard_bits_snapshot[flipped_vars] ^ np.uint8(1), dtype=np.uint8)
+    signs = np.where(target_bits == 0, 1.0, -1.0).astype(np.float32)
+    out[flipped_vars] = (float(gain) * mags * signs).astype(np.float32, copy=False)
+    return out
+
+
+def _run_short_ldpc_finish_pass(llr_channel: np.ndarray,
+                                true_bits: np.ndarray,
+                                code_cfg: CodeConfig,
+                                max_iters: int,
+                                alpha: float) -> Dict[str, Any]:
+    """Short re-decoding pass used by Receiver 4 candidates."""
+    dec_cfg = DecoderConfig(max_iters=int(max_iters), alpha=float(alpha), early_stop=True)
+    hard_bits, llr_post, syndrome, iter_used = ldpc_min_sum_decode(
+        llr_channel=np.asarray(llr_channel, dtype=np.float32),
+        code_cfg=code_cfg,
+        dec_cfg=dec_cfg,
+        snapshot_iters=[],
+        snapshots=None,
+    )
+    final_bit_errors = int(np.count_nonzero(hard_bits != np.asarray(true_bits, dtype=np.uint8)))
+    success = (int(np.asarray(syndrome, dtype=np.uint8).sum()) == 0)
+    return {
+        "success": bool(success),
+        "final_bit_errors": int(final_bit_errors),
+        "iter_used": int(iter_used),
+        "final_syndrome_weight": int(np.asarray(syndrome, dtype=np.uint8).sum()),
+    }
+
+
+def _run_presolver_chase_list(frame: FrameLog,
+                              sim_cfg: SimulationConfig,
+                              snapshot_iter: int,
+                              cfg: ClusterGrandConfig) -> Optional[ClusterGrandResult]:
+    """Receiver 4 pre-solver: Chase-style local list + short LDPC polish."""
+    code_cfg = sim_cfg.code
+
+    snaps = frame.snapshots
+    syn_snaps = snaps.get("syndrome", {})
+    hard_snaps = snaps.get("hard_bits", {})
+    llr_snaps = snaps.get("llr", {})
+
+    if (snapshot_iter not in syn_snaps or
+        snapshot_iter not in hard_snaps or
+        snapshot_iter not in llr_snaps):
+        raise ValueError(f"Snapshot at iter {snapshot_iter} is not fully available for Chase pre-solver.")
+
+    syndrome = syn_snaps[snapshot_iter]
+    hard_bits_snapshot = hard_snaps[snapshot_iter].copy()
+    llr_snapshot = llr_snaps[snapshot_iter]
+
+    initial_syndrome_weight = int(np.asarray(syndrome, dtype=np.uint8).sum())
+    if initial_syndrome_weight == 0:
+        return None
+
+    diff_init = (hard_bits_snapshot != frame.c_bits)
+    initial_bit_errors = int(diff_init.sum())
+    unsat_checks = np.flatnonzero(syndrome).astype(np.int32)
+
+    cluster_unsat_edges = 0
+    cluster_pair_edges = 0
+    if unsat_checks.size > 0:
+        for j in unsat_checks:
+            neigh = code_cfg.checks_to_vars[int(j)]
+            d = int(neigh.size)
+            cluster_unsat_edges += d
+            if d >= 2:
+                cluster_pair_edges += int(d * (d - 1) // 2)
+
+    llr_for_sort, llr_source_used = _resolve_sort_llr_vector(
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+        cfg=cfg,
+    )
+
+    allowed_mask = build_allowed_mask_from_config(frame, sim_cfg, snapshot_iter, cfg)
+    clusters = find_variable_clusters_from_syndrome(syndrome, code_cfg)
+    if not clusters:
+        return None
+
+    union_vars = np.unique(np.concatenate(clusters)).astype(np.int32)
+    union_vars = union_vars[allowed_mask[union_vars]]
+    L_full = int(union_vars.size)
+    if L_full == 0:
+        return None
+
+    L_search = _auto_pick_grand_search_size(L_full, cfg)
+    L_chase = _auto_pick_chase_candidate_size(L_full, L_search, cfg)
+    chase_vars, front_end_meta = _select_presolver_vars(
+        union_vars=union_vars,
+        unsat_checks=unsat_checks,
+        code_cfg=code_cfg,
+        llr_for_sort=llr_for_sort,
+        L_peel=L_chase,
+        cfg=cfg,
+    )
+
+    if chase_vars.size == 0:
+        return None
+
+    core_max_bits = max(1, int(getattr(cfg, "chase_core_max_bits", 12) or 12))
+    core_vars = np.asarray(chase_vars[:min(core_max_bits, chase_vars.size)], dtype=np.int32)
+    max_weight = max(1, int(getattr(cfg, "chase_max_weight", 3) or 3))
+    max_candidates = max(1, int(getattr(cfg, "chase_max_candidates", 96) or 96))
+
+    patterns, enum_meta = _enumerate_ranked_local_patterns(
+        core_vars=core_vars,
+        llr_for_sort=llr_for_sort,
+        base_syndrome=syndrome,
+        base_weight=int(initial_syndrome_weight),
+        code_cfg=code_cfg,
+        max_weight=max_weight,
+        max_candidates=max_candidates,
+    )
+
+    gain = float(getattr(cfg, "chase_llr_gain", 2.5) or 2.5)
+    abs_floor = float(getattr(cfg, "chase_llr_abs_floor", 4.0) or 4.0)
+    extra_iters = max(1, int(getattr(cfg, "chase_ldpc_extra_iters", 6) or 6))
+    alpha = float(os.getenv("CHASE_LDPC_ALPHA", os.getenv("GRAND_CTG_LDPC_ALPHA", "0.8")))
+
+    llr_base = np.asarray(getattr(frame, "llr_channel", None), dtype=np.float32) if getattr(frame, "llr_channel", None) is not None else np.asarray(llr_snapshot, dtype=np.float32)
+
+    def _make_attempt_result(success: bool,
+                             flipped_vars: Optional[np.ndarray] = None,
+                             final_bit_errors: Optional[int] = None,
+                             chase_candidates_tested: int = 0,
+                             chase_ldpc_total_iters: int = 0,
+                             chase_ldpc_num_runs: int = 0,
+                             chase_ldpc_num_nonconverged: int = 0,
+                             chase_best_syndrome_weight: Optional[int] = None,
+                             e_cnt: int = 0,
+                             uq_cnt: int = 0,
+                             tg_cnt: int = 0) -> ClusterGrandResult:
+        if flipped_vars is None:
+            flipped_vars = np.array([], dtype=np.int32)
+        if final_bit_errors is None:
+            final_bit_errors = int(initial_bit_errors)
+        if chase_best_syndrome_weight is None:
+            chase_best_syndrome_weight = int(initial_syndrome_weight)
+
+        res_local = ClusterGrandResult(
+            success=bool(success),
+            pattern_weight=int(flipped_vars.size) if bool(success) else -1,
+            flipped_vars=np.asarray(flipped_vars, dtype=np.int32),
+            patterns_tested=0,
+            initial_syndrome_weight=int(initial_syndrome_weight),
+            final_syndrome_weight=0 if bool(success) else int(initial_syndrome_weight),
+            initial_bit_errors=int(initial_bit_errors),
+            final_bit_errors=int(final_bit_errors),
+            total_v2c_edge_visits=int(e_cnt),
+            total_unique_checks_visited=int(uq_cnt),
+            total_unique_checks_toggled=int(tg_cnt),
+            patterns_generated=0,
+        )
+        setattr(res_local, "patterns_evaluated", 0)
+        setattr(res_local, "total_v2c_edge_visits_evaluated", 0)
+        setattr(res_local, "total_unique_checks_visited_evaluated", 0)
+        setattr(res_local, "total_unique_checks_toggled_evaluated", 0)
+        setattr(res_local, "union_size", int(L_full))
+        setattr(res_local, "search_size", int(L_search))
+        setattr(res_local, "llr_sort_len", int(L_full))
+        setattr(res_local, "sum_pattern_weights_generated", 0)
+        setattr(res_local, "cluster_unsat_edges", int(cluster_unsat_edges))
+        setattr(res_local, "cluster_pair_edges", int(cluster_pair_edges))
+        setattr(res_local, "num_batches_evaluated", 0)
+        setattr(res_local, "positions_packed_evaluated", 0)
+        setattr(res_local, "batch_size_used", 0)
+        setattr(res_local, "llr_source_used", str(llr_source_used))
+        setattr(res_local, "selection_mode_used", str(front_end_meta.get("selection_mode_used", getattr(cfg, "selection_mode", "llr"))))
+        setattr(res_local, "sv_seeded_count", int(front_end_meta.get("sv_seeded_count", 0)))
+        setattr(res_local, "sv_neighbor_visits", int(front_end_meta.get("sv_neighbor_visits", 0)))
+        setattr(res_local, "sv_score_len", int(front_end_meta.get("sv_score_len", L_full)))
+
+        setattr(res_local, "pre_solver_mode_used", "chase_list")
+        setattr(res_local, "pre_solver_attempted", 1)
+        setattr(res_local, "pre_solver_success", 1 if bool(success) else 0)
+        setattr(res_local, "peel_candidate_size", int(chase_vars.size))
+        setattr(res_local, "peel_residual_vars", int(chase_best_syndrome_weight))
+        setattr(res_local, "peel_residual_rows", 0)
+        setattr(res_local, "peel_edge_work", 0)
+        setattr(res_local, "peel_dense_xor_ops", 0)
+        setattr(res_local, "peel_free_dim", 0)
+        setattr(res_local, "peel_extra_llr_added", int(front_end_meta.get("peel_extra_llr_added", 0)))
+
+        setattr(res_local, "chase_candidate_size", int(chase_vars.size))
+        setattr(res_local, "chase_core_size", int(core_vars.size))
+        setattr(res_local, "chase_patterns_considered", int(enum_meta.get("chase_patterns_considered", 0)))
+        setattr(res_local, "chase_candidates_tested", int(chase_candidates_tested))
+        setattr(res_local, "chase_score_edge_visits", int(enum_meta.get("chase_score_edge_visits", 0)))
+        setattr(res_local, "chase_score_checks_toggled", int(enum_meta.get("chase_score_checks_toggled", 0)))
+        setattr(res_local, "chase_score_sum_pattern_weights", int(enum_meta.get("chase_score_sum_pattern_weights", 0)))
+        setattr(res_local, "chase_ldpc_total_iters", int(chase_ldpc_total_iters))
+        setattr(res_local, "chase_ldpc_num_runs", int(chase_ldpc_num_runs))
+        setattr(res_local, "chase_ldpc_num_nonconverged", int(chase_ldpc_num_nonconverged))
+        setattr(res_local, "chase_best_syndrome_weight", int(chase_best_syndrome_weight))
+        return res_local
+
+    if not patterns:
+        return _make_attempt_result(success=False)
+
+    chase_candidates_tested = 0
+    chase_ldpc_total_iters = 0
+    chase_ldpc_num_runs = 0
+    chase_ldpc_num_nonconverged = 0
+    best_syn = int(initial_syndrome_weight)
+
+    for syn_w, cost, w, flip_tuple, e_cnt, uq_cnt, tg_cnt in patterns:
+        best_syn = min(best_syn, int(syn_w))
+        flip_arr = np.asarray(flip_tuple, dtype=np.int32)
+
+        if int(syn_w) == 0:
+            final_bit_errors = _bit_errors_after_flips_from_base(
+                base_bits=hard_bits_snapshot,
+                true_bits=frame.c_bits,
+                base_bit_errors=int(initial_bit_errors),
+                flipped_vars=list(flip_tuple),
+            )
+            return _make_attempt_result(
+                success=True,
+                flipped_vars=flip_arr,
+                final_bit_errors=int(final_bit_errors),
+                chase_candidates_tested=int(chase_candidates_tested),
+                chase_ldpc_total_iters=int(chase_ldpc_total_iters),
+                chase_ldpc_num_runs=int(chase_ldpc_num_runs),
+                chase_ldpc_num_nonconverged=int(chase_ldpc_num_nonconverged),
+                chase_best_syndrome_weight=int(best_syn),
+                e_cnt=int(e_cnt),
+                uq_cnt=int(uq_cnt),
+                tg_cnt=int(tg_cnt),
+            )
+
+        llr_biased = _make_chase_biased_llr(
+            base_llr_channel=llr_base,
+            llr_snapshot=llr_snapshot,
+            hard_bits_snapshot=hard_bits_snapshot,
+            flipped_vars=flip_arr,
+            gain=float(gain),
+            abs_floor=float(abs_floor),
+        )
+        cand = _run_short_ldpc_finish_pass(
+            llr_channel=llr_biased,
+            true_bits=frame.c_bits,
+            code_cfg=code_cfg,
+            max_iters=int(extra_iters),
+            alpha=float(alpha),
+        )
+        chase_candidates_tested += 1
+        chase_ldpc_num_runs += 1
+        chase_ldpc_total_iters += int(cand.get("iter_used", 0))
+        if not bool(cand.get("success", False)):
+            chase_ldpc_num_nonconverged += 1
+        best_syn = min(best_syn, int(cand.get("final_syndrome_weight", best_syn)))
+
+        if bool(cand.get("success", False)):
+            return _make_attempt_result(
+                success=True,
+                flipped_vars=flip_arr,
+                final_bit_errors=int(cand.get("final_bit_errors", initial_bit_errors)),
+                chase_candidates_tested=int(chase_candidates_tested),
+                chase_ldpc_total_iters=int(chase_ldpc_total_iters),
+                chase_ldpc_num_runs=int(chase_ldpc_num_runs),
+                chase_ldpc_num_nonconverged=int(chase_ldpc_num_nonconverged),
+                chase_best_syndrome_weight=int(best_syn),
+                e_cnt=int(e_cnt),
+                uq_cnt=int(uq_cnt),
+                tg_cnt=int(tg_cnt),
+            )
+
+    return _make_attempt_result(
+        success=False,
+        chase_candidates_tested=int(chase_candidates_tested),
+        chase_ldpc_total_iters=int(chase_ldpc_total_iters),
+        chase_ldpc_num_runs=int(chase_ldpc_num_runs),
+        chase_ldpc_num_nonconverged=int(chase_ldpc_num_nonconverged),
+        chase_best_syndrome_weight=int(best_syn),
+    )
+
 
 def _run_presolver_peel_gf2(frame: FrameLog,
                             sim_cfg: SimulationConfig,
@@ -2912,12 +3352,100 @@ def run_local_rescue_with_optional_presolver(frame: FrameLog,
                                              cfg: ClusterGrandConfig) -> ClusterGrandResult:
     """Stage-2 wrapper.
 
-    If cfg.pre_solver_mode requests a stronger Receiver-3-style pre-solver,
-    try that first; otherwise (or on failure) fall back to the existing
-    enumerative GRAND engine unchanged.
+    Supported stronger front-ends:
+      - Receiver 3 : peel + weighted GF(2) pre-solver
+      - Receiver 4 : Chase-list + short-LDPC polish, then peel, then GRAND
     """
     mode = str(getattr(cfg, "pre_solver_mode", "none") or "none").strip().lower()
-    res_pre: Optional[ClusterGrandResult] = None
+
+    def _copy_attrs(dst: ClusterGrandResult,
+                    src: Optional[ClusterGrandResult],
+                    attrs: List[str]) -> None:
+        if src is None:
+            return
+        for attr in attrs:
+            if not hasattr(src, attr):
+                continue
+            src_val = getattr(src, attr)
+            cur = getattr(dst, attr, None)
+            should_copy = (cur is None)
+            if not should_copy:
+                if isinstance(cur, (int, np.integer)) and int(cur) == 0 and isinstance(src_val, (int, np.integer)) and int(src_val) != 0:
+                    should_copy = True
+                elif isinstance(cur, str) and cur in ("", "none") and isinstance(src_val, str) and src_val not in ("", "none"):
+                    should_copy = True
+                elif isinstance(cur, np.ndarray) and isinstance(src_val, np.ndarray) and cur.size == 0 and src_val.size > 0:
+                    should_copy = True
+            if should_copy:
+                setattr(dst, attr, src_val)
+
+    peel_attrs = [
+        "pre_solver_mode_used",
+        "pre_solver_attempted",
+        "pre_solver_success",
+        "peel_candidate_size",
+        "peel_residual_vars",
+        "peel_residual_rows",
+        "peel_edge_work",
+        "peel_dense_xor_ops",
+        "peel_free_dim",
+        "peel_extra_llr_added",
+    ]
+    chase_attrs = [
+        "chase_candidate_size",
+        "chase_core_size",
+        "chase_patterns_considered",
+        "chase_candidates_tested",
+        "chase_score_edge_visits",
+        "chase_score_checks_toggled",
+        "chase_score_sum_pattern_weights",
+        "chase_ldpc_total_iters",
+        "chase_ldpc_num_runs",
+        "chase_ldpc_num_nonconverged",
+        "chase_best_syndrome_weight",
+        "llr_source_used",
+        "selection_mode_used",
+        "sv_seeded_count",
+        "sv_neighbor_visits",
+        "sv_score_len",
+    ]
+
+    if mode in ("chase_list", "receiver4", "ctg"):
+        res_chase = _run_presolver_chase_list(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if (res_chase is not None) and bool(res_chase.success):
+            return res_chase
+
+        res_peel = _run_presolver_peel_gf2(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if (res_peel is not None) and bool(res_peel.success):
+            _copy_attrs(res_peel, res_chase, chase_attrs)
+            setattr(res_peel, "pre_solver_mode_used", "chase_list+peel_gf2")
+            setattr(res_peel, "pre_solver_attempted", 1)
+            setattr(res_peel, "pre_solver_success", 1)
+            return res_peel
+
+        res = run_local_grand_on_union_of_clusters(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        _copy_attrs(res, res_chase, chase_attrs)
+        _copy_attrs(res, res_peel, peel_attrs)
+        if (res_chase is not None) or (res_peel is not None):
+            setattr(res, "pre_solver_attempted", 1)
+            setattr(res, "pre_solver_success", 0)
+            setattr(res, "pre_solver_mode_used", "chase_list+peel_gf2")
+        return res
 
     if mode in ("peel_gf2", "receiver3", "ptg"):
         res_pre = _run_presolver_peel_gf2(
@@ -2929,36 +3457,28 @@ def run_local_rescue_with_optional_presolver(frame: FrameLog,
         if (res_pre is not None) and bool(res_pre.success):
             return res_pre
 
-    res = run_local_grand_on_union_of_clusters(
+        res = run_local_grand_on_union_of_clusters(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if res_pre is not None:
+            _copy_attrs(res, res_pre, peel_attrs)
+            setattr(res, "pre_solver_attempted", 1)
+            setattr(res, "pre_solver_success", 0)
+        else:
+            setattr(res, "pre_solver_mode_used", mode)
+            setattr(res, "pre_solver_attempted", 1)
+            setattr(res, "pre_solver_success", 0)
+        return res
+
+    return run_local_grand_on_union_of_clusters(
         frame=frame,
         sim_cfg=sim_cfg,
         snapshot_iter=snapshot_iter,
         cfg=cfg,
     )
-
-    # Attach "attempted but fell back" metadata when a pre-solver mode was enabled.
-    if (mode in ("peel_gf2", "receiver3", "ptg")) and (res_pre is not None):
-        for attr in [
-            "pre_solver_mode_used",
-            "pre_solver_attempted",
-            "pre_solver_success",
-            "peel_candidate_size",
-            "peel_residual_vars",
-            "peel_residual_rows",
-            "peel_edge_work",
-            "peel_dense_xor_ops",
-            "peel_free_dim",
-            "peel_extra_llr_added",
-        ]:
-            if hasattr(res_pre, attr):
-                setattr(res, attr, getattr(res_pre, attr))
-    elif mode in ("peel_gf2", "receiver3", "ptg"):
-        setattr(res, "pre_solver_mode_used", mode)
-        setattr(res, "pre_solver_attempted", 1)
-        setattr(res, "pre_solver_success", 0)
-
-    return res
-
 
 def run_local_grand_on_union_of_clusters(frame: FrameLog,
                                          sim_cfg: SimulationConfig,
@@ -3689,6 +4209,78 @@ grand_cfg_awgn_ptg_boost = ClusterGrandConfig(
     peel_max_free_enum=_get_int_env("GRAND_PTG_PEEL_MAX_FREE_ENUM", 12),
     peel_extra_llr_bits=_get_int_env("GRAND_PTG_PEEL_EXTRA_LLR_BITS", 8),
 )
+
+# ---- Receiver 4: Chase-list + short-LDPC polish + peel + GRAND fallback ----
+RUN_RECEIVER4 = bool(_get_int_env("RUN_RECEIVER4", 0))
+GRAND_CTG_USE_BOOST = bool(_get_int_env("GRAND_CTG_USE_BOOST", _get_int_env("GRAND_PTG_USE_BOOST", _get_int_env("GRAND_USE_BOOST", 1))))
+
+grand_cfg_awgn_ctg = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_CTG_MAX_WEIGHT", _get_int_env("GRAND_PTG_MAX_WEIGHT", _get_int_env("GRAND_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_CTG_MAX_PATTERNS", max(_get_int_env("GRAND_PTG_MAX_PATTERNS", _get_int_env("GRAND_MAX_PATTERNS", 5000)), 20000)),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_CTG_LLR_SOURCE",
+        os.environ.get("GRAND_PTG_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_CTG_OVERGEN",
+        _get_float_env("GRAND_PTG_OVERGEN", _get_float_env("GRAND_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_CTG_BATCH_SIZE", _get_int_env("GRAND_PTG_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_CTG_EPSILON", _get_float_env("GRAND_PTG_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3))),
+    sv_check_cover_k=_get_int_env("GRAND_CTG_CHECK_COVER_K", _get_int_env("GRAND_PTG_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 1))),
+    pre_solver_mode="chase_list",
+    peel_candidate_ratio=_get_float_env("GRAND_CTG_PEEL_RATIO", _get_float_env("GRAND_PTG_PEEL_RATIO", 1.75)),
+    peel_max_bits=_get_int_env("GRAND_CTG_PEEL_MAX_BITS", _get_int_env("GRAND_PTG_PEEL_MAX_BITS", 48)),
+    peel_dense_max_vars=_get_int_env("GRAND_CTG_PEEL_DENSE_MAX_VARS", _get_int_env("GRAND_PTG_PEEL_DENSE_MAX_VARS", 28)),
+    peel_max_free_enum=_get_int_env("GRAND_CTG_PEEL_MAX_FREE_ENUM", _get_int_env("GRAND_PTG_PEEL_MAX_FREE_ENUM", 12)),
+    peel_extra_llr_bits=_get_int_env("GRAND_CTG_PEEL_EXTRA_LLR_BITS", _get_int_env("GRAND_PTG_PEEL_EXTRA_LLR_BITS", 8)),
+    chase_candidate_ratio=_get_float_env("GRAND_CTG_CHASE_RATIO", 2.25),
+    chase_max_bits=_get_int_env("GRAND_CTG_CHASE_MAX_BITS", 64),
+    chase_core_max_bits=_get_int_env("GRAND_CTG_CORE_MAX_BITS", 14),
+    chase_max_weight=_get_int_env("GRAND_CTG_CORE_MAX_WEIGHT", 3),
+    chase_max_candidates=_get_int_env("GRAND_CTG_MAX_CANDIDATES", 96),
+    chase_ldpc_extra_iters=_get_int_env("GRAND_CTG_LDPC_EXTRA_ITERS", 6),
+    chase_llr_gain=_get_float_env("GRAND_CTG_LLR_GAIN", 3.0),
+    chase_llr_abs_floor=_get_float_env("GRAND_CTG_LLR_ABS_FLOOR", 5.0),
+)
+
+grand_cfg_awgn_ctg_boost = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_CTG_BOOST_MAX_WEIGHT", _get_int_env("GRAND_PTG_BOOST_MAX_WEIGHT", _get_int_env("GRAND_BOOST_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_CTG_BOOST_MAX_PATTERNS", max(_get_int_env("GRAND_PTG_BOOST_MAX_PATTERNS", _get_int_env("GRAND_BOOST_MAX_PATTERNS", 15000)), 60000)),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_CTG_LLR_SOURCE",
+        os.environ.get("GRAND_PTG_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_CTG_BOOST_OVERGEN",
+        _get_float_env("GRAND_PTG_BOOST_OVERGEN", _get_float_env("GRAND_BOOST_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_CTG_BATCH_SIZE", _get_int_env("GRAND_PTG_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_CTG_EPSILON", _get_float_env("GRAND_PTG_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3))),
+    sv_check_cover_k=_get_int_env("GRAND_CTG_CHECK_COVER_K", _get_int_env("GRAND_PTG_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 1))),
+    pre_solver_mode="none",  # do not repeat Chase/peel on the boost path
+    peel_candidate_ratio=_get_float_env("GRAND_CTG_PEEL_RATIO", _get_float_env("GRAND_PTG_PEEL_RATIO", 1.75)),
+    peel_max_bits=_get_int_env("GRAND_CTG_PEEL_MAX_BITS", _get_int_env("GRAND_PTG_PEEL_MAX_BITS", 48)),
+    peel_dense_max_vars=_get_int_env("GRAND_CTG_PEEL_DENSE_MAX_VARS", _get_int_env("GRAND_PTG_PEEL_DENSE_MAX_VARS", 28)),
+    peel_max_free_enum=_get_int_env("GRAND_CTG_PEEL_MAX_FREE_ENUM", _get_int_env("GRAND_PTG_PEEL_MAX_FREE_ENUM", 12)),
+    peel_extra_llr_bits=_get_int_env("GRAND_CTG_PEEL_EXTRA_LLR_BITS", _get_int_env("GRAND_PTG_PEEL_EXTRA_LLR_BITS", 8)),
+    chase_candidate_ratio=_get_float_env("GRAND_CTG_CHASE_RATIO", 2.25),
+    chase_max_bits=_get_int_env("GRAND_CTG_CHASE_MAX_BITS", 64),
+    chase_core_max_bits=_get_int_env("GRAND_CTG_CORE_MAX_BITS", 14),
+    chase_max_weight=_get_int_env("GRAND_CTG_CORE_MAX_WEIGHT", 3),
+    chase_max_candidates=_get_int_env("GRAND_CTG_MAX_CANDIDATES", 96),
+    chase_ldpc_extra_iters=_get_int_env("GRAND_CTG_LDPC_EXTRA_ITERS", 6),
+    chase_llr_gain=_get_float_env("GRAND_CTG_LLR_GAIN", 3.0),
+    chase_llr_abs_floor=_get_float_env("GRAND_CTG_LLR_ABS_FLOOR", 5.0),
+)
 # ======================================================================
 
 
@@ -3929,6 +4521,39 @@ def grand_hw_cycles_from_result(
         cycles += _ceil_div(peel_edge_work, epc)
     if peel_dense_xor_ops > 0:
         cycles += _ceil_div(peel_dense_xor_ops, add_pc)
+
+    # (4b) Receiver-4-style Chase-list work
+    chase_candidate_size = int(getattr(result, "chase_candidate_size", 0))
+    chase_core_size = int(getattr(result, "chase_core_size", 0))
+    chase_patterns_considered = int(getattr(result, "chase_patterns_considered", 0))
+    chase_score_edge_visits = int(getattr(result, "chase_score_edge_visits", 0))
+    chase_score_checks_toggled = int(getattr(result, "chase_score_checks_toggled", 0))
+    chase_score_sumw = int(getattr(result, "chase_score_sum_pattern_weights", 0))
+    chase_ldpc_num_runs = int(getattr(result, "chase_ldpc_num_runs", 0))
+    chase_ldpc_total_iters = int(getattr(result, "chase_ldpc_total_iters", 0))
+    chase_ldpc_num_nonconverged = int(getattr(result, "chase_ldpc_num_nonconverged", 0))
+
+    if chase_candidate_size > 0:
+        cycles += _ceil_div(chase_candidate_size, abs_pc)
+    if chase_core_size > 0:
+        cycles += _ceil_div(chase_core_size * _safe_log2_int(chase_core_size), sort_pc)
+    if chase_patterns_considered > 0:
+        cycles += _ceil_div(chase_score_sumw, add_pc)
+        cycles += _ceil_div(chase_patterns_considered * _safe_log2_int(chase_patterns_considered), psort_pc)
+    if chase_score_edge_visits > 0:
+        cycles += _ceil_div(chase_score_edge_visits, epc)
+    if chase_score_checks_toggled > 0:
+        cycles += _ceil_div(chase_score_checks_toggled, cpc)
+    if chase_ldpc_num_runs > 0 and chase_ldpc_total_iters > 0:
+        E = _ldpc_total_edges(code_cfg)
+        N = int(code_cfg.N)
+        c_edge = _ceil_div(E, int(hw.ldpc_edges_per_cycle))
+        c_hd = _ceil_div(N, int(hw.ldpc_bits_per_cycle_hd))
+        c_init = c_edge
+        c_iter_core = (c_edge + c_edge + c_hd + c_edge + int(hw.ldpc_iter_overhead_cycles))
+        cycles += int(chase_ldpc_num_runs) * int(c_init)
+        cycles += int(chase_ldpc_total_iters) * int(c_iter_core)
+        cycles += int(c_edge) * max(0, int(chase_ldpc_total_iters) - int(chase_ldpc_num_runs) + int(chase_ldpc_num_nonconverged))
 
     # (5) Pattern cost computation: total number of |LLR| terms summed
     cycles += _ceil_div(sumw_gen, add_pc)
@@ -4236,6 +4861,11 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_peel_residual_vars = []
     per_frame_peel_dense_xor_ops = []
 
+    # Optional Receiver-4 / Chase-list logs
+    per_frame_chase_candidate_size = []
+    per_frame_chase_candidates_tested = []
+    per_frame_chase_total_ldpc_iters = []
+
     n_frames = 0
     frame_id = 0
 
@@ -4298,6 +4928,10 @@ def run_hybrid_ldpc_grand_adaptive(
         peel_res_vars = 0
         peel_xor = 0
 
+        chase_cand = 0
+        chase_tested = 0
+        chase_ldpc_iters = 0
+
         # ---- Stage-2 GRAND ----
         if stage1_failed:
             try:
@@ -4332,9 +4966,23 @@ def run_hybrid_ldpc_grand_adaptive(
                         res2 = None
 
                     if res2 is not None:
+                        # Preserve pre-solver / chase metadata from the first attempt when the boost path
+                        # intentionally skips those front-ends.
+                        for attr in [
+                            "pre_solver_mode_used", "pre_solver_attempted", "pre_solver_success",
+                            "peel_candidate_size", "peel_residual_vars", "peel_residual_rows",
+                            "peel_edge_work", "peel_dense_xor_ops", "peel_free_dim", "peel_extra_llr_added",
+                            "chase_candidate_size", "chase_core_size", "chase_patterns_considered",
+                            "chase_candidates_tested", "chase_score_edge_visits", "chase_score_checks_toggled",
+                            "chase_score_sum_pattern_weights", "chase_ldpc_total_iters",
+                            "chase_ldpc_num_runs", "chase_ldpc_num_nonconverged", "chase_best_syndrome_weight",
+                            "llr_source_used", "selection_mode_used", "sv_seeded_count", "sv_neighbor_visits", "sv_score_len",
+                        ]:
+                            if hasattr(res, attr) and (not hasattr(res2, attr) or getattr(res2, attr) in (0, "", "none", None)):
+                                setattr(res2, attr, getattr(res, attr))
+
                         # Combine HW cycles (you actually executed both searches)
-                        hw_c_grand = grand_hw_cycles_from_result(res,  sim_cfg, hw_model) + \
-                                    grand_hw_cycles_from_result(res2, sim_cfg, hw_model)
+                        hw_c_grand = grand_hw_cycles_from_result(res,  sim_cfg, hw_model) +                                     grand_hw_cycles_from_result(res2, sim_cfg, hw_model)
 
                         # Combine logs (so tails reflect total work)
                         pt2 = int(getattr(res2, "patterns_tested", 0))
@@ -4392,6 +5040,11 @@ def run_hybrid_ldpc_grand_adaptive(
                 peel_res_vars = int(getattr(res, "peel_residual_vars", 0))
                 peel_xor = int(getattr(res, "peel_dense_xor_ops", 0))
 
+                # Optional Receiver-4 / Chase-list metadata
+                chase_cand = int(getattr(res, "chase_candidate_size", 0))
+                chase_tested = int(getattr(res, "chase_candidates_tested", 0))
+                chase_ldpc_iters = int(getattr(res, "chase_ldpc_total_iters", 0))
+
         # ---- Accumulate final stats ----
         total_bit_errs_after += be_after
         if be_after > 0:
@@ -4427,6 +5080,10 @@ def run_hybrid_ldpc_grand_adaptive(
         per_frame_peel_candidate_size.append(peel_cand)
         per_frame_peel_residual_vars.append(peel_res_vars)
         per_frame_peel_dense_xor_ops.append(peel_xor)
+
+        per_frame_chase_candidate_size.append(chase_cand)
+        per_frame_chase_candidates_tested.append(chase_tested)
+        per_frame_chase_total_ldpc_iters.append(chase_ldpc_iters)
 
         n_frames += 1
         frame_id += 1
@@ -4538,6 +5195,11 @@ def run_hybrid_ldpc_grand_adaptive(
         "per_frame_peel_candidate_size": np.array(per_frame_peel_candidate_size, dtype=np.int32),
         "per_frame_peel_residual_vars": np.array(per_frame_peel_residual_vars, dtype=np.int32),
         "per_frame_peel_dense_xor_ops": np.array(per_frame_peel_dense_xor_ops, dtype=np.int64),
+
+        # Optional Receiver-4 / Chase-list logs
+        "per_frame_chase_candidate_size": np.array(per_frame_chase_candidate_size, dtype=np.int32),
+        "per_frame_chase_candidates_tested": np.array(per_frame_chase_candidates_tested, dtype=np.int32),
+        "per_frame_chase_total_ldpc_iters": np.array(per_frame_chase_total_ldpc_iters, dtype=np.int32),
 
         # Stage-2 configuration (kept in the raw pickle; CSV summaries stay unchanged)
         "grand_selection_mode": str(getattr(grand_cfg, "selection_mode", "llr")),
@@ -4707,6 +5369,11 @@ def save_awgn_results(
         "pre_solver_attempt_rate", "pre_solver_success_rate_total", "pre_solver_success_rate_if_attempted",
         "peel_candidate_mean", "peel_candidate_p95", "peel_candidate_max",
         "peel_residual_vars_mean", "peel_residual_vars_p95", "peel_residual_vars_max",
+
+        # Optional Receiver-4 / Chase-list tails
+        "chase_candidate_mean", "chase_candidate_p95", "chase_candidate_max",
+        "chase_candidates_tested_mean", "chase_candidates_tested_p95", "chase_candidates_tested_max",
+        "chase_ldpc_iters_mean", "chase_ldpc_iters_p95", "chase_ldpc_iters_max",
     ]
 
     with open(tails_path, "w", newline="") as fcsv:
@@ -4769,6 +5436,15 @@ def save_awgn_results(
                     row["peel_residual_vars_mean"] = 0.0
                     row["peel_residual_vars_p95"] = 0.0
                     row["peel_residual_vars_max"] = 0.0
+                    row["chase_candidate_mean"] = 0.0
+                    row["chase_candidate_p95"] = 0.0
+                    row["chase_candidate_max"] = 0.0
+                    row["chase_candidates_tested_mean"] = 0.0
+                    row["chase_candidates_tested_p95"] = 0.0
+                    row["chase_candidates_tested_max"] = 0.0
+                    row["chase_ldpc_iters_mean"] = 0.0
+                    row["chase_ldpc_iters_p95"] = 0.0
+                    row["chase_ldpc_iters_max"] = 0.0
 
                 else:
                     n_frames = int(stats.get("n_frames", 0))
@@ -4882,6 +5558,25 @@ def save_awgn_results(
                     row["peel_residual_vars_mean"] = peel_resv_s["mean"]
                     row["peel_residual_vars_p95"]  = peel_resv_s["p95"]
                     row["peel_residual_vars_max"]  = peel_resv_s["max"]
+
+                    chase_cand = np.asarray(stats.get("per_frame_chase_candidate_size", []), dtype=np.int64)
+                    chase_tested = np.asarray(stats.get("per_frame_chase_candidates_tested", []), dtype=np.int64)
+                    chase_iters = np.asarray(stats.get("per_frame_chase_total_ldpc_iters", []), dtype=np.int64)
+
+                    chase_cand_s = _dist_stats(chase_cand)
+                    row["chase_candidate_mean"] = chase_cand_s["mean"]
+                    row["chase_candidate_p95"]  = chase_cand_s["p95"]
+                    row["chase_candidate_max"]  = chase_cand_s["max"]
+
+                    chase_tested_s = _dist_stats(chase_tested)
+                    row["chase_candidates_tested_mean"] = chase_tested_s["mean"]
+                    row["chase_candidates_tested_p95"]  = chase_tested_s["p95"]
+                    row["chase_candidates_tested_max"]  = chase_tested_s["max"]
+
+                    chase_iters_s = _dist_stats(chase_iters)
+                    row["chase_ldpc_iters_mean"] = chase_iters_s["mean"]
+                    row["chase_ldpc_iters_p95"]  = chase_iters_s["p95"]
+                    row["chase_ldpc_iters_max"]  = chase_iters_s["max"]
 
                 writer.writerow(row)
 
@@ -5362,6 +6057,7 @@ def run_awgn_sweep_for_code(
     base_seed = _env_int("RNG_SEED_GLOBAL", 12345) + _stable_u32_seed_from_string(code_cfg.code_name)
     run_receiver2 = bool(_env_int("RUN_RECEIVER2", 0))
     run_receiver3 = bool(_env_int("RUN_RECEIVER3", 0))
+    run_receiver4 = bool(_env_int("RUN_RECEIVER4", 0))
 
     results: Dict[float, Dict[str, Any]] = {}
 
@@ -5489,6 +6185,32 @@ def run_awgn_sweep_for_code(
                     rng_seed=seed,
                     label=dec_name,
                     grand_cfg_boost=(grand_cfg_awgn_ptg_boost if GRAND_PTG_USE_BOOST else None),
+                )
+
+        # Scenario 6: Receiver 4 (Chase-list + short-LDPC polish + peel + GRAND fallback)
+        if run_receiver4:
+            for it in stage1_list:
+                dec_name = f"hybctg{int(it)}"
+                seed = int((base_seed + 40_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
+
+                sim_cfg_hyb = SimulationConfig(
+                    code=code_cfg,
+                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
+                    interleaver=interleaver,
+                    rng_seed_global=int(base_seed),
+                    snapshot_iters=[int(it)],
+                )
+
+                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
+                    sim_cfg=sim_cfg_hyb,
+                    dec_cfg_stage1=dec_cfg,
+                    grand_cfg=grand_cfg_awgn_ctg,
+                    snapshot_iter=int(it),
+                    mc_cfg=mc_cfg_local,
+                    rng_seed=seed,
+                    label=dec_name,
+                    grand_cfg_boost=(grand_cfg_awgn_ctg_boost if GRAND_CTG_USE_BOOST else None),
                 )
 
         return snr_db, per_snr
