@@ -1669,6 +1669,15 @@ class ClusterGrandConfig:
     restart_dual_gain: float = 6.5         # optional stronger second anchor gain
     restart_anchor_all_selected: int = 0   # 1 -> anchor all selected vars to candidate values, else support only
 
+    # Receiver 6 / soft-hypothesis + anchored restart
+    soft_candidate_ratio: float = 3.0      # L_soft ~= ratio * L_search
+    soft_max_bits: Optional[int] = None    # hard cap on soft-hypothesis candidate size
+    soft_core_max_bits: int = 14           # enumerate hypotheses on this many top-ranked bits
+    soft_max_weight: int = 3               # max local flip weight for soft hypotheses
+    soft_max_candidates: int = 128         # keep at most this many ranked soft hypotheses
+    soft_sat_penalty: float = 0.35         # penalize variables mostly connected to satisfied checks
+    soft_llr_weight: float = 0.10          # small extra penalty on large-|LLR| bits in ranking
+
 
 
 ### CELL number 23 ###
@@ -3399,6 +3408,450 @@ def _make_anchor_restart_llr(base_llr_channel: np.ndarray,
 
 
 
+
+
+def _soft_rank_candidate_vars(candidate_vars: np.ndarray,
+                              unsat_checks: np.ndarray,
+                              code_cfg: CodeConfig,
+                              llr_for_sort: np.ndarray,
+                              cfg: ClusterGrandConfig,
+                              llr_snapshot: Optional[np.ndarray] = None,
+                              llr_channel: Optional[np.ndarray] = None) -> np.ndarray:
+    """Rank candidate variables for Receiver-6 soft hypotheses."""
+    candidate_vars = np.asarray(candidate_vars, dtype=np.int32)
+    if candidate_vars.size == 0:
+        return candidate_vars
+
+    unsat_set = set(int(j) for j in np.asarray(unsat_checks, dtype=np.int32).tolist())
+    eps = float(max(1e-9, float(getattr(cfg, "sv_epsilon", 1e-3) or 1e-3)))
+    sat_penalty = float(getattr(cfg, "soft_sat_penalty", 0.35) or 0.35)
+    llr_penalty = float(getattr(cfg, "soft_llr_weight", 0.10) or 0.10)
+
+    llr_snapshot_arr = None if llr_snapshot is None else np.asarray(llr_snapshot, dtype=np.float32)
+    llr_channel_arr = None if llr_channel is None else np.asarray(llr_channel, dtype=np.float32)
+
+    ranked = []
+    for v in candidate_vars.tolist():
+        checks = code_cfg.vars_to_checks[int(v)]
+        deg = int(len(checks))
+        unsat_deg = 0
+        for j in checks:
+            if int(j) in unsat_set:
+                unsat_deg += 1
+        sat_deg = max(0, deg - unsat_deg)
+
+        rel = float(abs(float(llr_for_sort[int(v)])))
+        disagree_bonus = 0.0
+        if llr_snapshot_arr is not None and llr_channel_arr is not None:
+            a = float(llr_snapshot_arr[int(v)])
+            b = float(llr_channel_arr[int(v)])
+            if np.sign(a) * np.sign(b) < 0:
+                disagree_bonus = 0.75
+
+        score = (float(unsat_deg) - sat_penalty * float(sat_deg) + disagree_bonus) / (rel + eps)
+        score -= llr_penalty * rel
+        ranked.append((-float(score), rel, int(v)))
+
+    ranked.sort()
+    return np.asarray([v for _neg_s, _rel, v in ranked], dtype=np.int32)
+
+
+def _enumerate_soft_hypotheses(base_syndrome: np.ndarray,
+                               base_syndrome_weight: int,
+                               candidate_vars: np.ndarray,
+                               code_cfg: CodeConfig,
+                               llr_for_sort: np.ndarray,
+                               cfg: ClusterGrandConfig,
+                               llr_snapshot: Optional[np.ndarray] = None,
+                               llr_channel: Optional[np.ndarray] = None) -> Tuple[List[np.ndarray], Dict[str, int]]:
+    """Generate a ranked list of soft local hypotheses for Receiver-6.
+
+    Unlike Receiver-5 OSD, this does not require the induced local subsystem to
+    be exactly consistent. We rank low-weight local flips by full-syndrome
+    reduction plus LLR cost, which is better matched to trapping-set escape.
+    """
+    candidate_vars = np.asarray(candidate_vars, dtype=np.int32)
+    if candidate_vars.size == 0:
+        return [], {
+            "soft_candidate_size": 0,
+            "soft_core_size": 0,
+            "soft_patterns_considered": 0,
+            "soft_score_edge_visits": 0,
+            "soft_score_checks_toggled": 0,
+            "soft_score_sum_pattern_weights": 0,
+        }
+
+    ranked_vars = _soft_rank_candidate_vars(
+        candidate_vars=candidate_vars,
+        unsat_checks=np.flatnonzero(np.asarray(base_syndrome, dtype=np.uint8)).astype(np.int32),
+        code_cfg=code_cfg,
+        llr_for_sort=llr_for_sort,
+        cfg=cfg,
+        llr_snapshot=llr_snapshot,
+        llr_channel=llr_channel,
+    )
+
+    core_max_bits = max(1, int(getattr(cfg, "soft_core_max_bits", 14) or 14))
+    max_weight = max(1, int(getattr(cfg, "soft_max_weight", 3) or 3))
+    max_candidates = max(1, int(getattr(cfg, "soft_max_candidates", 128) or 128))
+
+    core = ranked_vars[:min(int(ranked_vars.size), core_max_bits)]
+    if core.size == 0:
+        return [], {
+            "soft_candidate_size": int(candidate_vars.size),
+            "soft_core_size": 0,
+            "soft_patterns_considered": 0,
+            "soft_score_edge_visits": 0,
+            "soft_score_checks_toggled": 0,
+            "soft_score_sum_pattern_weights": 0,
+        }
+
+    ranked = []
+    total_edge_visits = 0
+    total_checks_toggled = 0
+    total_pattern_weights = 0
+    seen = set()
+    core_list = [int(v) for v in core.tolist()]
+
+    for w in range(1, min(max_weight, len(core_list)) + 1):
+        for comb in itertools.combinations(core_list, w):
+            if comb in seen:
+                continue
+            seen.add(comb)
+            syn_w, e_cnt, _uq_cnt, tg_cnt = _syndrome_weight_and_counts_after_flips_from_base(
+                base_syndrome=base_syndrome,
+                base_weight=int(base_syndrome_weight),
+                flipped_vars=list(comb),
+                code_cfg=code_cfg,
+            )
+            llr_cost = float(np.sum(np.abs(llr_for_sort[np.asarray(comb, dtype=np.int32)])))
+            ranked.append((int(syn_w), float(llr_cost), int(w), tuple(int(x) for x in comb)))
+            total_edge_visits += int(e_cnt)
+            total_checks_toggled += int(tg_cnt)
+            total_pattern_weights += int(w)
+
+    ranked.sort(key=lambda t: (int(t[0]), float(t[1]), int(t[2]), t[3]))
+    if len(ranked) > max_candidates:
+        ranked = ranked[:max_candidates]
+
+    out = [np.asarray(list(comb), dtype=np.int32) for _syn_w, _cost, _w, comb in ranked]
+    return out, {
+        "soft_candidate_size": int(candidate_vars.size),
+        "soft_core_size": int(core.size),
+        "soft_patterns_considered": int(len(ranked)),
+        "soft_score_edge_visits": int(total_edge_visits),
+        "soft_score_checks_toggled": int(total_checks_toggled),
+        "soft_score_sum_pattern_weights": int(total_pattern_weights),
+    }
+
+
+def _run_presolver_soft_anchor(frame: FrameLog,
+                               sim_cfg: SimulationConfig,
+                               snapshot_iter: int,
+                               cfg: ClusterGrandConfig) -> Optional[ClusterGrandResult]:
+    """Receiver-6 pre-solver: soft local hypotheses + anchored full-graph restarts."""
+    code_cfg = sim_cfg.code
+
+    snaps = frame.snapshots
+    syn_snaps = snaps.get("syndrome", {})
+    hard_snaps = snaps.get("hard_bits", {})
+    llr_snaps = snaps.get("llr", {})
+
+    if (snapshot_iter not in syn_snaps or
+        snapshot_iter not in hard_snaps or
+        snapshot_iter not in llr_snaps):
+        raise ValueError(f"Snapshot at iter {snapshot_iter} is not fully available for Receiver-6 pre-solver.")
+
+    syndrome = np.asarray(syn_snaps[snapshot_iter], dtype=np.uint8)
+    hard_bits_snapshot = np.asarray(hard_snaps[snapshot_iter], dtype=np.uint8).copy()
+    llr_snapshot = np.asarray(llr_snaps[snapshot_iter], dtype=np.float32)
+
+    initial_syndrome_weight = int(syndrome.sum())
+    if initial_syndrome_weight == 0:
+        return None
+
+    diff_init = (hard_bits_snapshot != np.asarray(frame.c_bits, dtype=np.uint8))
+    initial_bit_errors = int(diff_init.sum())
+    unsat_checks = np.flatnonzero(syndrome).astype(np.int32)
+
+    cluster_unsat_edges = 0
+    cluster_pair_edges = 0
+    if unsat_checks.size > 0:
+        for j in unsat_checks.tolist():
+            neigh = code_cfg.checks_to_vars[int(j)]
+            d = int(neigh.size)
+            cluster_unsat_edges += d
+            if d >= 2:
+                cluster_pair_edges += int(d * (d - 1) // 2)
+
+    llr_for_sort, llr_source_used = _resolve_sort_llr_vector(
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+        cfg=cfg,
+    )
+
+    allowed_mask = build_allowed_mask_from_config(frame, sim_cfg, snapshot_iter, cfg)
+    clusters = find_variable_clusters_from_syndrome(syndrome, code_cfg)
+    if not clusters:
+        return None
+
+    union_vars = np.unique(np.concatenate(clusters)).astype(np.int32)
+    union_vars = union_vars[allowed_mask[union_vars]]
+    L_full = int(union_vars.size)
+    if L_full == 0:
+        return None
+
+    L_search = _auto_pick_grand_search_size(L_full, cfg)
+    soft_ratio = float(getattr(cfg, "soft_candidate_ratio", 3.0) or 3.0)
+    L_soft = max(int(L_search), int(np.ceil(max(1.0, soft_ratio) * max(1, int(L_search)))))
+    soft_cap = getattr(cfg, "soft_max_bits", None)
+    if soft_cap is not None:
+        try:
+            L_soft = min(L_soft, int(soft_cap))
+        except Exception:
+            pass
+    L_soft = min(L_soft, L_full)
+
+    soft_vars, front_end_meta = _select_presolver_vars(
+        union_vars=union_vars,
+        unsat_checks=unsat_checks,
+        code_cfg=code_cfg,
+        llr_for_sort=llr_for_sort,
+        L_peel=L_soft,
+        cfg=cfg,
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+    )
+    if soft_vars.size == 0:
+        return None
+
+    hypotheses, soft_meta = _enumerate_soft_hypotheses(
+        base_syndrome=syndrome,
+        base_syndrome_weight=int(initial_syndrome_weight),
+        candidate_vars=soft_vars,
+        code_cfg=code_cfg,
+        llr_for_sort=llr_for_sort,
+        cfg=cfg,
+        llr_snapshot=llr_snapshot,
+        llr_channel=getattr(frame, "llr_channel", None),
+    )
+
+    llr_base = np.asarray(getattr(frame, "llr_channel", None), dtype=np.float32) if getattr(frame, "llr_channel", None) is not None else np.asarray(llr_snapshot, dtype=np.float32)
+    restart_max = max(1, int(getattr(cfg, "restart_max_candidates", 24) or 24))
+    restart_iters = max(1, int(getattr(cfg, "restart_ldpc_iters", 14) or 14))
+    restart_alpha = float(getattr(cfg, "restart_alpha", 0.78) or 0.78)
+    gain1 = float(getattr(cfg, "restart_llr_gain", 4.5) or 4.5)
+    gain2 = float(getattr(cfg, "restart_dual_gain", gain1) or gain1)
+    abs_floor = float(getattr(cfg, "restart_llr_abs_floor", 6.0) or 6.0)
+    anchor_all_first = bool(int(getattr(cfg, "restart_anchor_all_selected", 0) or 0))
+    second_pass_cap = max(0, min(restart_max, 8))
+    soft_idx = {int(v): i for i, v in enumerate(np.asarray(soft_vars, dtype=np.int32).tolist())}
+
+    def _make_attempt_result(success: bool,
+                             flipped_vars: Optional[np.ndarray] = None,
+                             final_bit_errors: Optional[int] = None,
+                             candidates_tested: int = 0,
+                             restart_num_runs: int = 0,
+                             restart_total_ldpc_iters: int = 0,
+                             restart_num_nonconverged: int = 0,
+                             restart_anchor_bits_total: int = 0,
+                             restart_best_syndrome_weight: Optional[int] = None) -> ClusterGrandResult:
+        if flipped_vars is None:
+            flipped_vars = np.array([], dtype=np.int32)
+        if final_bit_errors is None:
+            final_bit_errors = int(initial_bit_errors)
+        if restart_best_syndrome_weight is None:
+            restart_best_syndrome_weight = int(initial_syndrome_weight)
+
+        res_local = ClusterGrandResult(
+            success=bool(success),
+            pattern_weight=int(np.asarray(flipped_vars, dtype=np.int32).size) if bool(success) else -1,
+            flipped_vars=np.asarray(flipped_vars, dtype=np.int32),
+            patterns_tested=0,
+            initial_syndrome_weight=int(initial_syndrome_weight),
+            final_syndrome_weight=0 if bool(success) else int(restart_best_syndrome_weight),
+            initial_bit_errors=int(initial_bit_errors),
+            final_bit_errors=int(final_bit_errors),
+            total_v2c_edge_visits=0,
+            total_unique_checks_visited=0,
+            total_unique_checks_toggled=0,
+            patterns_generated=0,
+        )
+        setattr(res_local, "patterns_evaluated", 0)
+        setattr(res_local, "total_v2c_edge_visits_evaluated", 0)
+        setattr(res_local, "total_unique_checks_visited_evaluated", 0)
+        setattr(res_local, "total_unique_checks_toggled_evaluated", 0)
+        setattr(res_local, "union_size", int(L_full))
+        setattr(res_local, "search_size", int(L_search))
+        setattr(res_local, "llr_sort_len", int(L_full))
+        setattr(res_local, "sum_pattern_weights_generated", 0)
+        setattr(res_local, "cluster_unsat_edges", int(cluster_unsat_edges))
+        setattr(res_local, "cluster_pair_edges", int(cluster_pair_edges))
+        setattr(res_local, "num_batches_evaluated", 0)
+        setattr(res_local, "positions_packed_evaluated", 0)
+        setattr(res_local, "batch_size_used", 0)
+        setattr(res_local, "llr_source_used", str(llr_source_used))
+        setattr(res_local, "selection_mode_used", str(front_end_meta.get("selection_mode_used", getattr(cfg, "selection_mode", "llr"))))
+        setattr(res_local, "sv_seeded_count", int(front_end_meta.get("sv_seeded_count", 0)))
+        setattr(res_local, "sv_neighbor_visits", int(front_end_meta.get("sv_neighbor_visits", 0)))
+        setattr(res_local, "sv_score_len", int(front_end_meta.get("sv_score_len", L_full)))
+        setattr(res_local, "pre_solver_mode_used", "soft_anchor")
+        setattr(res_local, "pre_solver_attempted", 1)
+        setattr(res_local, "pre_solver_success", 1 if bool(success) else 0)
+        setattr(res_local, "peel_extra_llr_added", int(front_end_meta.get("peel_extra_llr_added", 0)))
+        setattr(res_local, "disagreement_added", int(front_end_meta.get("disagreement_added", 0)))
+
+        setattr(res_local, "chase_candidate_size", int(soft_meta.get("soft_candidate_size", int(soft_vars.size))))
+        setattr(res_local, "chase_core_size", int(soft_meta.get("soft_core_size", 0)))
+        setattr(res_local, "chase_patterns_considered", int(soft_meta.get("soft_patterns_considered", 0)))
+        setattr(res_local, "chase_candidates_tested", int(candidates_tested))
+        setattr(res_local, "chase_score_edge_visits", int(soft_meta.get("soft_score_edge_visits", 0)))
+        setattr(res_local, "chase_score_checks_toggled", int(soft_meta.get("soft_score_checks_toggled", 0)))
+        setattr(res_local, "chase_score_sum_pattern_weights", int(soft_meta.get("soft_score_sum_pattern_weights", 0)))
+        setattr(res_local, "chase_ldpc_total_iters", 0)
+        setattr(res_local, "chase_ldpc_num_runs", 0)
+        setattr(res_local, "chase_ldpc_num_nonconverged", 0)
+        setattr(res_local, "chase_best_syndrome_weight", int(restart_best_syndrome_weight))
+
+        setattr(res_local, "restart_num_runs", int(restart_num_runs))
+        setattr(res_local, "restart_total_ldpc_iters", int(restart_total_ldpc_iters))
+        setattr(res_local, "restart_num_nonconverged", int(restart_num_nonconverged))
+        setattr(res_local, "restart_anchor_bits_total", int(restart_anchor_bits_total))
+        setattr(res_local, "restart_best_syndrome_weight", int(restart_best_syndrome_weight))
+        return res_local
+
+    if not hypotheses:
+        return _make_attempt_result(success=False)
+
+    candidates_tested = 0
+    restart_num_runs = 0
+    restart_total_ldpc_iters = 0
+    restart_num_nonconverged = 0
+    restart_anchor_bits_total = 0
+    best_syn = int(initial_syndrome_weight)
+
+    for idx, flip_vars in enumerate(hypotheses[:restart_max]):
+        flip_vars = np.asarray(flip_vars, dtype=np.int32)
+        candidates_tested += 1
+
+        syn_w_full, _e_cnt, _uq_cnt, _tg_cnt = _syndrome_weight_and_counts_after_flips_from_base(
+            base_syndrome=syndrome,
+            base_weight=int(initial_syndrome_weight),
+            flipped_vars=[int(v) for v in flip_vars.tolist()],
+            code_cfg=code_cfg,
+        )
+        best_syn = min(best_syn, int(syn_w_full))
+        if int(syn_w_full) == 0:
+            final_bit_errors = _bit_errors_after_flips_from_base(
+                base_bits=hard_bits_snapshot,
+                true_bits=np.asarray(frame.c_bits, dtype=np.uint8),
+                base_bit_errors=int(initial_bit_errors),
+                flipped_vars=[int(v) for v in flip_vars.tolist()],
+            )
+            return _make_attempt_result(
+                success=True,
+                flipped_vars=flip_vars,
+                final_bit_errors=int(final_bit_errors),
+                candidates_tested=int(candidates_tested),
+                restart_num_runs=int(restart_num_runs),
+                restart_total_ldpc_iters=int(restart_total_ldpc_iters),
+                restart_num_nonconverged=int(restart_num_nonconverged),
+                restart_anchor_bits_total=int(restart_anchor_bits_total),
+                restart_best_syndrome_weight=int(best_syn),
+            )
+
+        x_local = np.zeros((soft_vars.size,), dtype=np.uint8)
+        for v in flip_vars.tolist():
+            pos = soft_idx.get(int(v), None)
+            if pos is not None:
+                x_local[int(pos)] = np.uint8(1)
+
+        llr_restart, anchor_bits = _make_anchor_restart_llr(
+            base_llr_channel=llr_base,
+            llr_snapshot=llr_snapshot,
+            hard_bits_snapshot=hard_bits_snapshot,
+            candidate_vars=soft_vars,
+            x_local=x_local,
+            gain=float(gain1),
+            abs_floor=float(abs_floor),
+            anchor_all_selected=bool(anchor_all_first),
+        )
+        if anchor_bits > 0:
+            cand = _run_short_ldpc_finish_pass(
+                llr_channel=llr_restart,
+                true_bits=frame.c_bits,
+                code_cfg=code_cfg,
+                max_iters=int(restart_iters),
+                alpha=float(restart_alpha),
+            )
+            restart_num_runs += 1
+            restart_total_ldpc_iters += int(cand.get("iter_used", 0))
+            restart_anchor_bits_total += int(anchor_bits)
+            if not bool(cand.get("success", False)):
+                restart_num_nonconverged += 1
+            best_syn = min(best_syn, int(cand.get("final_syndrome_weight", best_syn)))
+            if bool(cand.get("success", False)):
+                return _make_attempt_result(
+                    success=True,
+                    flipped_vars=flip_vars,
+                    final_bit_errors=int(cand.get("final_bit_errors", initial_bit_errors)),
+                    candidates_tested=int(candidates_tested),
+                    restart_num_runs=int(restart_num_runs),
+                    restart_total_ldpc_iters=int(restart_total_ldpc_iters),
+                    restart_num_nonconverged=int(restart_num_nonconverged),
+                    restart_anchor_bits_total=int(restart_anchor_bits_total),
+                    restart_best_syndrome_weight=int(best_syn),
+                )
+
+        if idx < second_pass_cap and gain2 > gain1 + 1e-6:
+            llr_restart2, anchor_bits2 = _make_anchor_restart_llr(
+                base_llr_channel=llr_base,
+                llr_snapshot=llr_snapshot,
+                hard_bits_snapshot=hard_bits_snapshot,
+                candidate_vars=soft_vars,
+                x_local=x_local,
+                gain=float(gain2),
+                abs_floor=float(abs_floor),
+                anchor_all_selected=True,
+            )
+            if anchor_bits2 > 0:
+                cand2 = _run_short_ldpc_finish_pass(
+                    llr_channel=llr_restart2,
+                    true_bits=frame.c_bits,
+                    code_cfg=code_cfg,
+                    max_iters=int(restart_iters),
+                    alpha=float(restart_alpha),
+                )
+                restart_num_runs += 1
+                restart_total_ldpc_iters += int(cand2.get("iter_used", 0))
+                restart_anchor_bits_total += int(anchor_bits2)
+                if not bool(cand2.get("success", False)):
+                    restart_num_nonconverged += 1
+                best_syn = min(best_syn, int(cand2.get("final_syndrome_weight", best_syn)))
+                if bool(cand2.get("success", False)):
+                    return _make_attempt_result(
+                        success=True,
+                        flipped_vars=flip_vars,
+                        final_bit_errors=int(cand2.get("final_bit_errors", initial_bit_errors)),
+                        candidates_tested=int(candidates_tested),
+                        restart_num_runs=int(restart_num_runs),
+                        restart_total_ldpc_iters=int(restart_total_ldpc_iters),
+                        restart_num_nonconverged=int(restart_num_nonconverged),
+                        restart_anchor_bits_total=int(restart_anchor_bits_total),
+                        restart_best_syndrome_weight=int(best_syn),
+                    )
+
+    return _make_attempt_result(
+        success=False,
+        candidates_tested=int(candidates_tested),
+        restart_num_runs=int(restart_num_runs),
+        restart_total_ldpc_iters=int(restart_total_ldpc_iters),
+        restart_num_nonconverged=int(restart_num_nonconverged),
+        restart_anchor_bits_total=int(restart_anchor_bits_total),
+        restart_best_syndrome_weight=int(best_syn),
+    )
+
+
 def _run_presolver_osd_anchor(frame: FrameLog,
                               sim_cfg: SimulationConfig,
                               snapshot_iter: int,
@@ -3949,6 +4402,7 @@ def run_local_rescue_with_optional_presolver(frame: FrameLog,
       - Receiver 3 : peel + weighted GF(2) pre-solver
       - Receiver 4 : Chase-list + short-LDPC polish, then peel, then GRAND
       - Receiver 5 : local OSD + anchored full-graph restarts, then peel, then GRAND
+      - Receiver 6 : soft local hypotheses + anchored full-graph restarts, then peel, then GRAND
     """
     mode = str(getattr(cfg, "pre_solver_mode", "none") or "none").strip().lower()
 
@@ -4028,6 +4482,65 @@ def run_local_rescue_with_optional_presolver(frame: FrameLog,
         "peel_extra_llr_added",
         "disagreement_added",
     ]
+    soft_attrs = [
+        "chase_candidate_size",
+        "chase_core_size",
+        "chase_patterns_considered",
+        "chase_candidates_tested",
+        "chase_score_edge_visits",
+        "chase_score_checks_toggled",
+        "chase_score_sum_pattern_weights",
+        "chase_best_syndrome_weight",
+        "restart_num_runs",
+        "restart_total_ldpc_iters",
+        "restart_num_nonconverged",
+        "restart_anchor_bits_total",
+        "restart_best_syndrome_weight",
+        "llr_source_used",
+        "selection_mode_used",
+        "sv_seeded_count",
+        "sv_neighbor_visits",
+        "sv_score_len",
+        "peel_extra_llr_added",
+        "disagreement_added",
+    ]
+
+    if mode in ("soft_anchor", "receiver6", "ahr", "hybahr", "soft"):
+        res_soft = _run_presolver_soft_anchor(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if (res_soft is not None) and bool(res_soft.success):
+            return res_soft
+
+        res_peel = _run_presolver_peel_gf2(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        if (res_peel is not None) and bool(res_peel.success):
+            _copy_attrs(res_peel, res_soft, soft_attrs)
+            setattr(res_peel, "pre_solver_mode_used", "soft_anchor+peel_gf2")
+            setattr(res_peel, "pre_solver_attempted", 1)
+            setattr(res_peel, "pre_solver_success", 1)
+            return res_peel
+
+        res = run_local_grand_on_union_of_clusters(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=snapshot_iter,
+            cfg=cfg,
+        )
+        _copy_attrs(res, res_soft, soft_attrs)
+        _copy_attrs(res, res_peel, peel_attrs)
+        if (res_soft is not None) or (res_peel is not None):
+            setattr(res, "pre_solver_attempted", 1)
+            setattr(res, "pre_solver_success", 0)
+            setattr(res, "pre_solver_mode_used", "soft_anchor+peel_gf2")
+        return res
 
     if mode in ("osd_anchor", "receiver5", "osd", "hybosd"):
         res_osd = _run_presolver_osd_anchor(
@@ -5020,6 +5533,92 @@ grand_cfg_awgn_osd_boost = ClusterGrandConfig(
     restart_llr_abs_floor=_get_float_env("GRAND_OSD_RESTART_ABS_FLOOR", 6.0),
     restart_dual_gain=_get_float_env("GRAND_OSD_RESTART_DUAL_GAIN", 6.5),
     restart_anchor_all_selected=_get_int_env("GRAND_OSD_RESTART_ANCHOR_ALL", 0),
+)
+
+# ---- Receiver 6: soft local hypotheses + anchored restarts + peel + GRAND fallback ----
+RUN_RECEIVER6 = bool(_get_int_env("RUN_RECEIVER6", 0))
+GRAND_AHR_USE_BOOST = bool(_get_int_env("GRAND_AHR_USE_BOOST", _get_int_env("GRAND_OSD_USE_BOOST", _get_int_env("GRAND_USE_BOOST", 1))))
+
+grand_cfg_awgn_ahr = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_AHR_MAX_WEIGHT", _get_int_env("GRAND_OSD_MAX_WEIGHT", _get_int_env("GRAND_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_AHR_MAX_PATTERNS", max(_get_int_env("GRAND_OSD_MAX_PATTERNS", _get_int_env("GRAND_MAX_PATTERNS", 5000)), 100000)),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_AHR_LLR_SOURCE",
+        os.environ.get("GRAND_OSD_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_AHR_OVERGEN",
+        _get_float_env("GRAND_OSD_OVERGEN", _get_float_env("GRAND_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_AHR_BATCH_SIZE", _get_int_env("GRAND_OSD_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_AHR_EPSILON", _get_float_env("GRAND_OSD_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3))),
+    sv_check_cover_k=_get_int_env("GRAND_AHR_CHECK_COVER_K", _get_int_env("GRAND_OSD_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 2))),
+    pre_solver_mode="soft_anchor",
+    peel_candidate_ratio=_get_float_env("GRAND_AHR_PEEL_RATIO", _get_float_env("GRAND_OSD_PEEL_RATIO", 2.0)),
+    peel_max_bits=_get_int_env("GRAND_AHR_PEEL_MAX_BITS", _get_int_env("GRAND_OSD_PEEL_MAX_BITS", 72)),
+    peel_dense_max_vars=_get_int_env("GRAND_AHR_PEEL_DENSE_MAX_VARS", _get_int_env("GRAND_OSD_PEEL_DENSE_MAX_VARS", 32)),
+    peel_max_free_enum=_get_int_env("GRAND_AHR_PEEL_MAX_FREE_ENUM", _get_int_env("GRAND_OSD_PEEL_MAX_FREE_ENUM", 12)),
+    peel_extra_llr_bits=_get_int_env("GRAND_AHR_PEEL_EXTRA_LLR_BITS", _get_int_env("GRAND_OSD_PEEL_EXTRA_LLR_BITS", 12)),
+    osd_disagreement_extra_bits=_get_int_env("GRAND_AHR_DISAGREEMENT_BITS", _get_int_env("GRAND_OSD_DISAGREEMENT_BITS", 12)),
+    restart_max_candidates=_get_int_env("GRAND_AHR_RESTART_MAX_CANDIDATES", 24),
+    restart_ldpc_iters=_get_int_env("GRAND_AHR_RESTART_ITERS", 18),
+    restart_alpha=_get_float_env("GRAND_AHR_RESTART_ALPHA", 0.78),
+    restart_llr_gain=_get_float_env("GRAND_AHR_RESTART_GAIN", 4.8),
+    restart_llr_abs_floor=_get_float_env("GRAND_AHR_RESTART_ABS_FLOOR", 6.5),
+    restart_dual_gain=_get_float_env("GRAND_AHR_RESTART_DUAL_GAIN", 7.0),
+    restart_anchor_all_selected=_get_int_env("GRAND_AHR_RESTART_ANCHOR_ALL", 0),
+    soft_candidate_ratio=_get_float_env("GRAND_AHR_RATIO", 3.2),
+    soft_max_bits=_get_int_env("GRAND_AHR_MAX_BITS", 96),
+    soft_core_max_bits=_get_int_env("GRAND_AHR_CORE_MAX_BITS", 14),
+    soft_max_weight=_get_int_env("GRAND_AHR_CORE_MAX_WEIGHT", 3),
+    soft_max_candidates=_get_int_env("GRAND_AHR_MAX_CANDIDATES", 128),
+    soft_sat_penalty=_get_float_env("GRAND_AHR_SAT_PENALTY", 0.35),
+    soft_llr_weight=_get_float_env("GRAND_AHR_LLR_WEIGHT", 0.10),
+)
+
+grand_cfg_awgn_ahr_boost = ClusterGrandConfig(
+    max_weight=_get_int_env("GRAND_AHR_BOOST_MAX_WEIGHT", _get_int_env("GRAND_OSD_BOOST_MAX_WEIGHT", _get_int_env("GRAND_BOOST_MAX_WEIGHT", 5))),
+    max_patterns=_get_int_env("GRAND_AHR_BOOST_MAX_PATTERNS", max(_get_int_env("GRAND_OSD_BOOST_MAX_PATTERNS", _get_int_env("GRAND_BOOST_MAX_PATTERNS", 15000)), 600000)),
+    max_bits_from_cluster=None,
+    verbose=False,
+    llr_source=os.environ.get(
+        "GRAND_AHR_LLR_SOURCE",
+        os.environ.get("GRAND_OSD_LLR_SOURCE", os.environ.get("GRAND_LLR_SOURCE", "mixed")),
+    ).strip().lower(),
+    pattern_overgen_ratio=_get_float_env(
+        "GRAND_AHR_BOOST_OVERGEN",
+        _get_float_env("GRAND_OSD_BOOST_OVERGEN", _get_float_env("GRAND_BOOST_OVERGEN", 1.02)),
+    ),
+    max_syndrome_weight_for_grand=None,
+    batch_size=_get_int_env("GRAND_AHR_BATCH_SIZE", _get_int_env("GRAND_OSD_BATCH_SIZE", _get_int_env("GRAND_BATCH_SIZE", 256))),
+    selection_mode="syndrome_vote",
+    sv_epsilon=_get_float_env("GRAND_AHR_EPSILON", _get_float_env("GRAND_OSD_EPSILON", _get_float_env("GRAND_SV_EPSILON", 1e-3))),
+    sv_check_cover_k=_get_int_env("GRAND_AHR_CHECK_COVER_K", _get_int_env("GRAND_OSD_CHECK_COVER_K", _get_int_env("GRAND_SV_CHECK_COVER_K", 2))),
+    pre_solver_mode="none",  # do not repeat soft hypotheses / peel on the boost path
+    peel_candidate_ratio=_get_float_env("GRAND_AHR_PEEL_RATIO", _get_float_env("GRAND_OSD_PEEL_RATIO", 2.0)),
+    peel_max_bits=_get_int_env("GRAND_AHR_PEEL_MAX_BITS", _get_int_env("GRAND_OSD_PEEL_MAX_BITS", 72)),
+    peel_dense_max_vars=_get_int_env("GRAND_AHR_PEEL_DENSE_MAX_VARS", _get_int_env("GRAND_OSD_PEEL_DENSE_MAX_VARS", 32)),
+    peel_max_free_enum=_get_int_env("GRAND_AHR_PEEL_MAX_FREE_ENUM", _get_int_env("GRAND_OSD_PEEL_MAX_FREE_ENUM", 12)),
+    peel_extra_llr_bits=_get_int_env("GRAND_AHR_PEEL_EXTRA_LLR_BITS", _get_int_env("GRAND_OSD_PEEL_EXTRA_LLR_BITS", 12)),
+    osd_disagreement_extra_bits=_get_int_env("GRAND_AHR_DISAGREEMENT_BITS", _get_int_env("GRAND_OSD_DISAGREEMENT_BITS", 12)),
+    restart_max_candidates=_get_int_env("GRAND_AHR_RESTART_MAX_CANDIDATES", 24),
+    restart_ldpc_iters=_get_int_env("GRAND_AHR_RESTART_ITERS", 18),
+    restart_alpha=_get_float_env("GRAND_AHR_RESTART_ALPHA", 0.78),
+    restart_llr_gain=_get_float_env("GRAND_AHR_RESTART_GAIN", 4.8),
+    restart_llr_abs_floor=_get_float_env("GRAND_AHR_RESTART_ABS_FLOOR", 6.5),
+    restart_dual_gain=_get_float_env("GRAND_AHR_RESTART_DUAL_GAIN", 7.0),
+    restart_anchor_all_selected=_get_int_env("GRAND_AHR_RESTART_ANCHOR_ALL", 0),
+    soft_candidate_ratio=_get_float_env("GRAND_AHR_RATIO", 3.2),
+    soft_max_bits=_get_int_env("GRAND_AHR_MAX_BITS", 96),
+    soft_core_max_bits=_get_int_env("GRAND_AHR_CORE_MAX_BITS", 14),
+    soft_max_weight=_get_int_env("GRAND_AHR_CORE_MAX_WEIGHT", 3),
+    soft_max_candidates=_get_int_env("GRAND_AHR_MAX_CANDIDATES", 128),
+    soft_sat_penalty=_get_float_env("GRAND_AHR_SAT_PENALTY", 0.35),
+    soft_llr_weight=_get_float_env("GRAND_AHR_LLR_WEIGHT", 0.10),
 )
 # ======================================================================
 
@@ -6934,6 +7533,7 @@ def run_awgn_sweep_for_code(
     run_receiver3 = bool(_env_int("RUN_RECEIVER3", 0))
     run_receiver4 = bool(_env_int("RUN_RECEIVER4", 0))
     run_receiver5 = bool(_env_int("RUN_RECEIVER5", 0))
+    run_receiver6 = bool(_env_int("RUN_RECEIVER6", 0))
 
     results: Dict[float, Dict[str, Any]] = {}
 
@@ -7113,6 +7713,32 @@ def run_awgn_sweep_for_code(
                     rng_seed=seed,
                     label=dec_name,
                     grand_cfg_boost=(grand_cfg_awgn_osd_boost if GRAND_OSD_USE_BOOST else None),
+                )
+
+        # Scenario 8: Receiver 6 (soft local hypotheses + anchored restarts + peel + GRAND fallback)
+        if run_receiver6:
+            for it in stage1_list:
+                dec_name = f"hybahr{int(it)}"
+                seed = int((base_seed + 60_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
+
+                sim_cfg_hyb = SimulationConfig(
+                    code=code_cfg,
+                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
+                    interleaver=interleaver,
+                    rng_seed_global=int(base_seed),
+                    snapshot_iters=[int(it)],
+                )
+
+                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
+                    sim_cfg=sim_cfg_hyb,
+                    dec_cfg_stage1=dec_cfg,
+                    grand_cfg=grand_cfg_awgn_ahr,
+                    snapshot_iter=int(it),
+                    mc_cfg=mc_cfg_local,
+                    rng_seed=seed,
+                    label=dec_name,
+                    grand_cfg_boost=(grand_cfg_awgn_ahr_boost if GRAND_AHR_USE_BOOST else None),
                 )
 
         return snr_db, per_snr
