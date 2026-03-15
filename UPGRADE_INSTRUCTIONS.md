@@ -1,49 +1,52 @@
-# Exact upgrade instructions
+# Upgrade instructions for Receiver-7
 
-## Files to replace in your repository
-
-Replace these existing files:
+## 1) Replace these existing files in the repo root
 - `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py`
 - `run_ms.sbatch`
+- `run_ms_scout.sbatch`
 - `run_ms_fair.sbatch`
 - `README.md`
-
-## Files to add
-
-Add these new files:
-- `run_ms_scout.sbatch`
 - `UPGRADE_INSTRUCTIONS.md`
-- `RECEIVER6_NOTES.md`
-- `CURRENT_RUN_DIAGNOSIS.md`
 
-## Exact shell steps
+## 2) Add these new files
+- `RECEIVER7_NOTES.md`
+- `CURRENT_RESULTS_REVIEW.md`
+- `REMOVE_FROM_REPO.txt`
+
+## 3) Remove these stale files from the current repo root
+- `CODE_MATCH_CHECKSUMS.md`
+- `CURRENT_RESULTS_DIGEST.md`
+- `CURRENT_RUN_DIAGNOSIS.md`
+- `REPO_FIX_INSTRUCTIONS.md`
+- `RECEIVER6_NOTES.md`
+
+## Exact shell commands
 
 ```bash
 cd /path/to/FIR_GRAND_SyndromeVote
 
-mkdir -p backup_receiver6
-cp HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py \
-   run_ms.sbatch \
-   run_ms_fair.sbatch \
-   README.md \
-   backup_receiver6/
+mkdir -p backup_receiver7
+cp HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py    run_ms.sbatch    run_ms_scout.sbatch    run_ms_fair.sbatch    README.md    UPGRADE_INSTRUCTIONS.md    RECEIVER6_NOTES.md    CODE_MATCH_CHECKSUMS.md    CURRENT_RESULTS_DIGEST.md    CURRENT_RUN_DIAGNOSIS.md    REPO_FIX_INSTRUCTIONS.md    backup_receiver7/ 2>/dev/null || true
 
-unzip /path/to/FIR_GRAND_receiver6_softanchor.zip -d /tmp/fir_receiver6_pkg
+unzip /path/to/FIR_GRAND_receiver7_basisgrand.zip -d /tmp/fir_receiver7_pkg
 
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/run_ms.sbatch .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/run_ms_fair.sbatch .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/run_ms_scout.sbatch .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/README.md .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/UPGRADE_INSTRUCTIONS.md .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/RECEIVER6_NOTES.md .
-cp /tmp/fir_receiver6_pkg/FIR_GRAND_receiver6_softanchor/CURRENT_RUN_DIAGNOSIS.md .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms.sbatch .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms_scout.sbatch .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms_fair.sbatch .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/README.md .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/UPGRADE_INSTRUCTIONS.md .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/RECEIVER7_NOTES.md .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/CURRENT_RESULTS_REVIEW.md .
+cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/REMOVE_FROM_REPO.txt .
+
+rm -f CODE_MATCH_CHECKSUMS.md       CURRENT_RESULTS_DIGEST.md       CURRENT_RUN_DIAGNOSIS.md       REPO_FIX_INSTRUCTIONS.md       RECEIVER6_NOTES.md
 
 python -m py_compile HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py
-bash -n run_ms.sbatch run_ms_fair.sbatch run_ms_scout.sbatch
+bash -n run_ms.sbatch run_ms_scout.sbatch run_ms_fair.sbatch
 ```
 
-## Recommended run order
+## 4) Run order
 
 ```bash
 sbatch run_ms_scout.sbatch
@@ -51,15 +54,18 @@ sbatch run_ms.sbatch
 sbatch run_ms_fair.sbatch
 ```
 
-## What to look for in the outputs
+## 5) What to look for in the new results
+The main new decoder family is:
+- `hybbgr4`
+- `hybbgr8`
+- `hybbgr15`
 
-New decoder names:
-- `hybahr4`
-- `hybahr8`
-- `hybahr15`
+Success signs:
+- `hybbgr15` clearly below its own `fer_stage1`
+- `hybbgr15` beating `ldpc20` in a region where FER is not huge
+- ideally `hybbgr15` also beating `ldpc100` at least over part of the mid-FER region
+- lower GRAND effort per successful rescue than the current `hybahr15`
 
-New tail behavior to watch:
-- nonzero `restart_num_runs_mean`
-- nonzero `restart_anchor_bits_mean`
-- improved `pre_solver_success_rate_if_attempted`
-- final FER moving materially below `fer_stage1` for the 15-iteration hybrid
+## Note
+The new `run_ms.sbatch` is intentionally **not** the old extreme-stress setup.
+It is still 5G-compatible, but it is milder so that a localized rescue stage has a fair chance to show a meaningful win.

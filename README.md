@@ -1,47 +1,67 @@
-# FIR_GRAND Receiver-6 soft-anchor upgrade
+# FIR_GRAND Receiver-7 basis-GRAND upgrade
 
-This package extends the current Receiver-1 / Receiver-2 / Receiver-3 / Receiver-4 / Receiver-5 pipeline with a stronger stage-2 path aimed at the failure mode seen in the latest runs:
+This package upgrades the current Receiver-6 soft-anchor path with a new **Receiver-7 / basis-GRAND + block-debias restart** path.
 
-- post-BP trapping-set / wrong-fixed-point states,
-- structured LLR bias from imperfect CSI,
-- local residuals for which exact OSD/GF(2) reprocessing often has zero useful free dimension.
+## Why this upgrade
+The latest `run_ms_scout.sbatch` and `run_ms.sbatch` results show two things:
 
-## What is new
+1. The hybrid occasionally wins, but only in a **very high-FER regime**.
+2. The current strongest path (`hybahr15`) spends a lot of stage-2 effort, yet rescues only a small fraction of its own stage-1 failures.
 
-New decoders:
-- `hybahr4`
-- `hybahr8`
-- `hybahr15`
+That means the bottleneck is not simply:
+- more LDPC iterations,
+- more raw GRAND patterns,
+- or a slightly different SNR point.
 
-They keep all existing outputs and add a stronger stage-2 path:
-1. syndrome-vote + check-cover front-end,
-2. soft local hypothesis enumeration on the residual candidate set,
-3. ranking by syndrome reduction plus LLR cost,
-4. anchored full-graph LDPC restarts from the original channel LLRs,
-5. peel / weighted GF(2) fallback,
-6. GRAND fallback.
+The residual errors look **structured**: correlated reliability distortions, wrong-BP-basin states, and grouped local disagreement patterns. Receiver-7 attacks that directly.
 
-## Why this is needed
+## What Receiver-7 does
+Receiver-7 adds a new hybrid decoder family:
 
-The latest Receiver-5 runs show that the local OSD path is often not really engaging:
-- `osd_free_dim_mean` is essentially zero,
-- `restart_num_runs_mean` is zero,
-- and the final rescue fraction is far below what is needed to catch `ldpc20` consistently.
+- `hybbgr4`
+- `hybbgr8`
+- `hybbgr15`
 
-That means the dominant failures are not behaving like small exact local error patterns. They look more like wrong-BP-basin failures. Receiver-6 attacks that regime directly by generating *soft* local hypotheses even when the local parity subsystem is not nicely solvable.
+Its stage-2 flow is:
+
+1. syndrome-vote + check-cover front-end
+2. build a small library of **structured basis patterns**
+   - unsatisfied-check neighborhoods
+   - short ranked windows
+   - posterior-vs-channel disagreement groups
+   - top singleton suspects
+3. run GRAND over **combinations of those basis vectors**
+4. use a **block-debias anchored restart** on the full LDPC graph
+5. fall back to the existing peel / GRAND machinery
+
+This is still GRAND-based, but it is much more efficient than spending hundreds of thousands of tests on raw independent bit-flip patterns.
 
 ## Included files
+- `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py` — upgraded simulator with Receiver-7
+- `run_ms.sbatch` — targeted moderate-impairment run intended to show a practical hybrid advantage
+- `run_ms_scout.sbatch` — broad scout run to find the actual winning region
+- `run_ms_fair.sbatch` — calmer comparison run, still with Receiver-7 available
+- `UPGRADE_INSTRUCTIONS.md` — exact replace/add/remove steps
+- `RECEIVER7_NOTES.md` — tuning notes and new environment variables
+- `CURRENT_RESULTS_REVIEW.md` — concise diagnosis of why the current Receiver-6 runs are not convincing
+- `REMOVE_FROM_REPO.txt` — stale files to delete for a clean repo
 
-- `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py` — upgraded simulator with Receiver-6
-- `run_ms.sbatch` — stressed NR-like run with Receiver-6 enabled and a broader default sweep
-- `run_ms_fair.sbatch` — closer apples-to-apples run with Receiver-6 enabled
-- `run_ms_scout.sbatch` — broad scout sweep to find the actual sweet spot first
-- `UPGRADE_INSTRUCTIONS.md` — exact replace/add steps
-- `RECEIVER6_NOTES.md` — what the new knobs do and what to tweak first
-- `CURRENT_RUN_DIAGNOSIS.md` — concise diagnosis of why the current Receiver-5 runs do not win yet
+## Important operating-point change
+The previous scout/stress runs were too harsh:
+- even `ldpc100` stayed at very high FER across the whole sweep,
+- so the hybrid only won in a regime that is not a persuasive demonstration.
 
-## Important note
+The new `run_ms.sbatch` and `run_ms_scout.sbatch` intentionally move to a **milder but still 5G-compatible imperfect-CSI regime**, where:
+- failures are still structured,
+- but they are not so global that every decoder is broken.
 
-`run_ms.sbatch` and `run_ms_scout.sbatch` intentionally target a reliability-distorting 5G-compatible operating region. They are better for demonstrating where a hybrid can help, but they are not apples-to-apples with the static perfect-CSI TDL-A setup.
+That is a better place to show a meaningful hybrid win.
 
-Use `run_ms_fair.sbatch` when you want a closer comparison to the calmer baseline setup.
+## Practical recommendation
+Run in this order:
+1. `sbatch run_ms_scout.sbatch`
+2. inspect the FER crossover region
+3. `sbatch run_ms.sbatch`
+4. optionally `sbatch run_ms_fair.sbatch`
+
+The scout run is important because the right region should be identified from data, not guessed.
