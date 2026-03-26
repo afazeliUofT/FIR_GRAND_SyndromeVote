@@ -1,67 +1,59 @@
-# FIR_GRAND Receiver-7 basis-GRAND upgrade
+# FIR_GRAND Receiver-7 overlay
 
-This package upgrades the current Receiver-6 soft-anchor path with a new **Receiver-7 / basis-GRAND + block-debias restart** path.
+This overlay does two things that the current repo does not do reliably:
 
-## Why this upgrade
-The latest `run_ms_scout.sbatch` and `run_ms.sbatch` results show two things:
+1. It enables a stronger **Receiver-7 / basis-GRAND + block-debias restart** path.
+2. It fixes two evaluation issues that were holding the hybrid back:
+   - the rescue stage now probes **multiple LDPC snapshots**, not just the final stage-1 snapshot;
+   - the Slurm scripts now default to **paired decoder frame streams** (`PAIR_DECODER_STREAMS=1`), so FER comparisons against legacy LDPC are directly comparable on the same frame bank.
 
-1. The hybrid occasionally wins, but only in a **very high-FER regime**.
-2. The current strongest path (`hybahr15`) spends a lot of stage-2 effort, yet rescues only a small fraction of its own stage-1 failures.
+## Important repo-state note
+The committed `logs/` and `results/` folders are **stale older runs**. They do **not** validate Receiver-7.
+The current repo scripts already mention Receiver-7, but the committed outputs still come from older harsh-channel runs without `hybbgr*` results.
+See `CURRENT_RESULTS_REVIEW.md`.
 
-That means the bottleneck is not simply:
-- more LDPC iterations,
-- more raw GRAND patterns,
-- or a slightly different SNR point.
+## What changed in the code
+The main simulator (`HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py`) now supports:
 
-The residual errors look **structured**: correlated reliability distortions, wrong-BP-basin states, and grouped local disagreement patterns. Receiver-7 attacks that directly.
-
-## What Receiver-7 does
-Receiver-7 adds a new hybrid decoder family:
-
-- `hybbgr4`
-- `hybbgr8`
-- `hybbgr15`
-
-Its stage-2 flow is:
-
-1. syndrome-vote + check-cover front-end
-2. build a small library of **structured basis patterns**
-   - unsatisfied-check neighborhoods
-   - short ranked windows
-   - posterior-vs-channel disagreement groups
-   - top singleton suspects
-3. run GRAND over **combinations of those basis vectors**
-4. use a **block-debias anchored restart** on the full LDPC graph
-5. fall back to the existing peel / GRAND machinery
-
-This is still GRAND-based, but it is much more efficient than spending hundreds of thousands of tests on raw independent bit-flip patterns.
+- `RUN_RECEIVER1=0/1` so the plain GRAND hybrid can be disabled when you only want LDPC vs Receiver-7,
+- `GRAND_RESCUE_SNAPSHOT_ITERS="..."` to rescue from several stage-1 snapshots,
+- cumulative stage-2 accounting across repeated snapshot tries,
+- `PAIR_DECODER_STREAMS=1` for common-random-number / same-frame decoder comparisons.
 
 ## Included files
-- `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py` — upgraded simulator with Receiver-7
-- `run_ms.sbatch` — targeted moderate-impairment run intended to show a practical hybrid advantage
-- `run_ms_scout.sbatch` — broad scout run to find the actual winning region
-- `run_ms_fair.sbatch` — calmer comparison run, still with Receiver-7 available
-- `UPGRADE_INSTRUCTIONS.md` — exact replace/add/remove steps
-- `RECEIVER7_NOTES.md` — tuning notes and new environment variables
-- `CURRENT_RESULTS_REVIEW.md` — concise diagnosis of why the current Receiver-6 runs are not convincing
-- `REMOVE_FROM_REPO.txt` — stale files to delete for a clean repo
+- `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py`
+- `run_ms.sbatch`
+- `run_ms_scout.sbatch`
+- `run_ms_fair.sbatch`
+- `run_ms_receiver7_winner.sbatch`
+- `README.md`
+- `UPGRADE_INSTRUCTIONS.md`
+- `CURRENT_RESULTS_REVIEW.md`
+- `RECEIVER7_NOTES.md`
+- `REMOVE_FROM_REPO.txt`
 
-## Important operating-point change
-The previous scout/stress runs were too harsh:
-- even `ldpc100` stayed at very high FER across the whole sweep,
-- so the hybrid only won in a regime that is not a persuasive demonstration.
+## Which Slurm to run
+If your goal is **best FER and the cleanest Receiver-7 vs legacy LDPC comparison**, run:
 
-The new `run_ms.sbatch` and `run_ms_scout.sbatch` intentionally move to a **milder but still 5G-compatible imperfect-CSI regime**, where:
-- failures are still structured,
-- but they are not so global that every decoder is broken.
+```bash
+sbatch run_ms_receiver7_winner.sbatch
+```
 
-That is a better place to show a meaningful hybrid win.
+That run is intentionally narrow:
+- `ldpc100` vs `hybbgr100`
+- same stage-1 depth
+- same frame bank (`PAIR_DECODER_STREAMS=1`)
+- aggressive Receiver-7 settings
+- multi-snapshot rescue schedule ending at iteration 100
 
-## Practical recommendation
-Run in this order:
-1. `sbatch run_ms_scout.sbatch`
-2. inspect the FER crossover region
-3. `sbatch run_ms.sbatch`
-4. optionally `sbatch run_ms_fair.sbatch`
+## Optional follow-up runs
+Use these only after the winner run if you want broader mapping:
 
-The scout run is important because the right region should be identified from data, not guessed.
+```bash
+sbatch run_ms_scout.sbatch
+sbatch run_ms.sbatch
+sbatch run_ms_fair.sbatch
+```
+
+## Cleanup
+Before committing new results, remove the stale tracked outputs listed in `REMOVE_FROM_REPO.txt`.

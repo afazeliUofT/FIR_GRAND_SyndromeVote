@@ -1,52 +1,39 @@
-# Upgrade instructions for Receiver-7
+# Upgrade instructions
 
-## 1) Replace these existing files in the repo root
-- `HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py`
-- `run_ms.sbatch`
-- `run_ms_scout.sbatch`
-- `run_ms_fair.sbatch`
-- `README.md`
-- `UPGRADE_INSTRUCTIONS.md`
+## 1) From the repo root, overlay the new files
 
-## 2) Add these new files
-- `RECEIVER7_NOTES.md`
-- `CURRENT_RESULTS_REVIEW.md`
-- `REMOVE_FROM_REPO.txt`
-
-## 3) Remove these stale files from the current repo root
-- `CODE_MATCH_CHECKSUMS.md`
-- `CURRENT_RESULTS_DIGEST.md`
-- `CURRENT_RUN_DIAGNOSIS.md`
-- `REPO_FIX_INSTRUCTIONS.md`
-- `RECEIVER6_NOTES.md`
-
-## Exact shell commands
+The zip is built so that extracting it **from the repo root** updates files in place.
 
 ```bash
 cd /path/to/FIR_GRAND_SyndromeVote
-
-mkdir -p backup_receiver7
-cp HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py    run_ms.sbatch    run_ms_scout.sbatch    run_ms_fair.sbatch    README.md    UPGRADE_INSTRUCTIONS.md    RECEIVER6_NOTES.md    CODE_MATCH_CHECKSUMS.md    CURRENT_RESULTS_DIGEST.md    CURRENT_RUN_DIAGNOSIS.md    REPO_FIX_INSTRUCTIONS.md    backup_receiver7/ 2>/dev/null || true
-
-unzip /path/to/FIR_GRAND_receiver7_basisgrand.zip -d /tmp/fir_receiver7_pkg
-
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms.sbatch .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms_scout.sbatch .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/run_ms_fair.sbatch .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/README.md .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/UPGRADE_INSTRUCTIONS.md .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/RECEIVER7_NOTES.md .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/CURRENT_RESULTS_REVIEW.md .
-cp /tmp/fir_receiver7_pkg/FIR_GRAND_receiver7_basisgrand/REMOVE_FROM_REPO.txt .
-
-rm -f CODE_MATCH_CHECKSUMS.md       CURRENT_RESULTS_DIGEST.md       CURRENT_RUN_DIAGNOSIS.md       REPO_FIX_INSTRUCTIONS.md       RECEIVER6_NOTES.md
-
-python -m py_compile HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py
-bash -n run_ms.sbatch run_ms_scout.sbatch run_ms_fair.sbatch
+unzip -o /path/to/FIR_GRAND_receiver7_overlay.zip
 ```
 
-## 4) Run order
+## 2) Validate the updated files
+
+```bash
+python -m py_compile HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py
+bash -n run_ms.sbatch run_ms_scout.sbatch run_ms_fair.sbatch run_ms_receiver7_winner.sbatch
+```
+
+## 3) Clean stale tracked outputs and old notes
+
+```bash
+while IFS= read -r item; do
+  [[ -z "$item" || "$item" =~ ^# ]] && continue
+  rm -rf "$item"
+done < REMOVE_FROM_REPO.txt
+```
+
+## 4) Recommended run order
+
+If you want the strongest direct Receiver-7-vs-LDPC result first:
+
+```bash
+sbatch run_ms_receiver7_winner.sbatch
+```
+
+If you also want broader operating-point mapping:
 
 ```bash
 sbatch run_ms_scout.sbatch
@@ -54,18 +41,20 @@ sbatch run_ms.sbatch
 sbatch run_ms_fair.sbatch
 ```
 
-## 5) What to look for in the new results
-The main new decoder family is:
-- `hybbgr4`
-- `hybbgr8`
-- `hybbgr15`
+## 5) What changed technically
 
-Success signs:
-- `hybbgr15` clearly below its own `fer_stage1`
-- `hybbgr15` beating `ldpc20` in a region where FER is not huge
-- ideally `hybbgr15` also beating `ldpc100` at least over part of the mid-FER region
-- lower GRAND effort per successful rescue than the current `hybahr15`
+- `GRAND_RESCUE_SNAPSHOT_ITERS` now lets stage-2 rescue probe several LDPC snapshots.
+- `PAIR_DECODER_STREAMS=1` makes decoder FER comparisons use the same frame stream.
+- `RUN_RECEIVER1=0/1` lets you disable the plain GRAND hybrid when you only want `ldpc100` vs `hybbgr100`.
+- `run_ms_receiver7_winner.sbatch` is the dedicated best-FER comparison run.
 
-## Note
-The new `run_ms.sbatch` is intentionally **not** the old extreme-stress setup.
-It is still 5G-compatible, but it is milder so that a localized rescue stage has a fair chance to show a meaningful win.
+## 6) What to expect in outputs
+
+The dedicated winner run should mainly emit:
+- `ldpc100`
+- `hybbgr100`
+
+and, if you leave `RUN_RECEIVER1=1`, also:
+- `hyb100`
+
+With paired streams and the same stage-1 depth, `hybbgr100` should not empirically trail `ldpc100` on FER; it can only match or improve by rescuing some of the residual `ldpc100` failures.

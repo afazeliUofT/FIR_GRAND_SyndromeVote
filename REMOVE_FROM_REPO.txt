@@ -1,0 +1,19 @@
+# Stale tracked result folders from older pre-Receiver-7 runs
+results/run_ms.sbatch_27796723
+results/run_ms_scout.sbatch_27768739
+
+# Stale tracked logs from older pre-Receiver-7 runs
+logs/run_ms.sbatch-27796723.out
+logs/run_ms.sbatch-27796723.err
+logs/run_ms_scout.sbatch-27768739.out
+logs/run_ms_scout.sbatch-27768739.err
+
+# Old local notes / diagnostics if they still exist in your working tree
+CODE_MATCH_CHECKSUMS.md
+CURRENT_RESULTS_DIGEST.md
+CURRENT_RUN_DIAGNOSIS.md
+REPO_FIX_INSTRUCTIONS.md
+RECEIVER6_NOTES.md
+
+# Common generated clutter (remove only if present)
+__pycache__

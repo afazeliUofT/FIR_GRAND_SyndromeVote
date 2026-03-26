@@ -6895,13 +6895,263 @@ def run_ldpc_min_sum_adaptive(
 
 
 ### CELL number 30 ###
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Sequence
+import copy
+
+_STAGE2_BOOST_COPY_ATTRS = [
+    "pre_solver_mode_used", "pre_solver_attempted", "pre_solver_success",
+    "peel_candidate_size", "peel_residual_vars", "peel_residual_rows",
+    "peel_edge_work", "peel_dense_xor_ops", "peel_free_dim", "peel_extra_llr_added",
+    "chase_candidate_size", "chase_core_size", "chase_patterns_considered",
+    "chase_candidates_tested", "chase_score_edge_visits", "chase_score_checks_toggled",
+    "chase_score_sum_pattern_weights", "chase_ldpc_total_iters",
+    "chase_ldpc_num_runs", "chase_ldpc_num_nonconverged", "chase_best_syndrome_weight",
+    "osd_candidate_size", "osd_matrix_rows", "osd_free_dim", "osd_enum_bits_used",
+    "osd_basis_xor_ops", "osd_candidates_considered", "osd_candidates_tested",
+    "osd_sum_candidate_weights", "restart_num_runs", "restart_total_ldpc_iters",
+    "restart_num_nonconverged", "restart_anchor_bits_total", "restart_best_syndrome_weight",
+    "llr_source_used", "selection_mode_used", "sv_seeded_count", "sv_neighbor_visits", "sv_score_len", "disagreement_added",
+]
+
+# Per-attempt quantities that should accumulate across repeated snapshot rescues.
+_STAGE2_SUM_ATTRS = [
+    "patterns_tested",
+    "patterns_evaluated",
+    "total_v2c_edge_visits",
+    "total_v2c_edge_visits_evaluated",
+    "total_unique_checks_visited",
+    "total_unique_checks_toggled",
+    "total_unique_checks_toggled_evaluated",
+    "patterns_generated",
+    "num_batches_evaluated",
+    "positions_packed_evaluated",
+    "llr_sort_len",
+    "search_size",
+    "sum_pattern_weights_generated",
+    "cluster_unsat_edges",
+    "cluster_pair_edges",
+    "peel_candidate_size",
+    "peel_residual_vars",
+    "peel_residual_rows",
+    "peel_edge_work",
+    "peel_dense_xor_ops",
+    "peel_free_dim",
+    "peel_extra_llr_bits",
+    "peel_extra_llr_added",
+    "chase_candidate_size",
+    "chase_core_size",
+    "chase_patterns_considered",
+    "chase_candidates_tested",
+    "chase_score_edge_visits",
+    "chase_score_checks_toggled",
+    "chase_score_sum_pattern_weights",
+    "chase_ldpc_total_iters",
+    "chase_ldpc_num_runs",
+    "chase_ldpc_num_nonconverged",
+    "osd_candidate_size",
+    "osd_matrix_rows",
+    "osd_free_dim",
+    "osd_enum_bits_used",
+    "osd_basis_xor_ops",
+    "osd_candidates_considered",
+    "osd_candidates_tested",
+    "osd_sum_candidate_weights",
+    "restart_num_runs",
+    "restart_total_ldpc_iters",
+    "restart_num_nonconverged",
+    "restart_anchor_bits_total",
+    "sv_seeded_count",
+    "sv_neighbor_visits",
+    "sv_score_len",
+    "disagreement_added",
+]
+
+# Frame-level binary indicators; keep them binary even if several snapshots are attempted.
+_STAGE2_MAX_ATTRS = [
+    "pre_solver_attempted",
+    "pre_solver_success",
+]
+
+
+def _normalize_snapshot_schedule(snapshot_iter: Any) -> List[int]:
+    """Normalize a stage-2 snapshot specification into a sorted unique list."""
+    if isinstance(snapshot_iter, np.ndarray):
+        vals = [int(x) for x in snapshot_iter.reshape(-1).tolist()]
+    elif isinstance(snapshot_iter, (list, tuple)):
+        vals = [int(x) for x in snapshot_iter]
+    else:
+        vals = [int(snapshot_iter)]
+
+    vals = sorted(set(int(v) for v in vals if int(v) > 0))
+    if not vals:
+        raise ValueError("snapshot_iter must contain at least one positive iteration")
+    return vals
+
+
+
+def _resolve_grand_snapshot_schedule(stage1_iter: int) -> List[int]:
+    """Resolve which LDPC snapshots the hybrid stage-2 should probe.
+
+    Environment variable:
+      GRAND_RESCUE_SNAPSHOT_ITERS
+        Comma-separated tokens chosen from integers and/or one of
+        {stage1, final, last, max, it}. Any integers above stage1_iter are ignored.
+
+    Default schedule intentionally probes early/mid snapshots before the final one,
+    because many structured residuals are easier to rescue before LDPC hardens around
+    a wrong basin. The final stage-1 snapshot is always appended.
+    """
+    stage1_iter = int(stage1_iter)
+    raw = str(os.environ.get("GRAND_RESCUE_SNAPSHOT_ITERS", "")).strip()
+    if not raw:
+        raw = "4,8,12,15,20,40,60,80,stage1"
+
+    vals: List[int] = []
+    for tok in raw.split(","):
+        t = tok.strip().lower()
+        if not t:
+            continue
+        if t in ("stage1", "final", "last", "max", "it", "iter", "stage1_iter"):
+            vals.append(stage1_iter)
+            continue
+        try:
+            v = int(float(t))
+        except Exception:
+            continue
+        if 0 < v <= stage1_iter:
+            vals.append(v)
+
+    vals.append(stage1_iter)
+    vals = sorted(set(int(v) for v in vals if 0 < int(v) <= stage1_iter))
+    if not vals:
+        vals = [stage1_iter]
+    return vals
+
+
+
+def _copy_missing_result_attrs(dst: ClusterGrandResult,
+                               src: Optional[ClusterGrandResult],
+                               attrs: Sequence[str]) -> None:
+    if src is None:
+        return
+    for attr in attrs:
+        if not hasattr(src, attr):
+            continue
+        src_val = getattr(src, attr)
+        cur = getattr(dst, attr, None)
+        should_copy = (not hasattr(dst, attr)) or (cur is None)
+        if not should_copy:
+            if isinstance(cur, (int, np.integer, float, np.floating)) and float(cur) == 0.0:
+                should_copy = True
+            elif isinstance(cur, str) and cur in ("", "none"):
+                should_copy = True
+            elif isinstance(cur, np.ndarray) and isinstance(src_val, np.ndarray) and cur.size == 0 and src_val.size > 0:
+                should_copy = True
+        if should_copy:
+            setattr(dst, attr, src_val)
+
+
+
+def _grand_attempt_exhausted(res: ClusterGrandResult, cfg: ClusterGrandConfig) -> bool:
+    pt = int(getattr(res, "patterns_tested", 0))
+    pg = int(getattr(res, "patterns_generated", 0))
+    cap = int(getattr(cfg, "max_patterns", pt))
+    return (pg > 0) and (pt >= min(pg, cap))
+
+
+
+def _run_stage2_single_snapshot(
+    frame: FrameLog,
+    sim_cfg: SimulationConfig,
+    snapshot_iter: int,
+    grand_cfg: ClusterGrandConfig,
+    grand_cfg_boost: Optional[ClusterGrandConfig] = None,
+) -> Tuple[Optional[ClusterGrandResult], List[ClusterGrandResult]]:
+    """Run one snapshot rescue, optionally followed by a boosted retry."""
+    attempts: List[ClusterGrandResult] = []
+    try:
+        res = run_local_rescue_with_optional_presolver(
+            frame=frame,
+            sim_cfg=sim_cfg,
+            snapshot_iter=int(snapshot_iter),
+            cfg=grand_cfg,
+        )
+    except Exception as e:
+        print(f"[WARN] GRAND failed to run on frame {frame.frame_id} at snap={snapshot_iter}: {e}")
+        return None, attempts
+
+    if res is None:
+        return None, attempts
+
+    attempts.append(res)
+
+    if (not bool(res.success)) and (grand_cfg_boost is not None) and _grand_attempt_exhausted(res, grand_cfg):
+        try:
+            res2 = run_local_rescue_with_optional_presolver(
+                frame=frame,
+                sim_cfg=sim_cfg,
+                snapshot_iter=int(snapshot_iter),
+                cfg=grand_cfg_boost,
+            )
+        except Exception as e:
+            print(f"[WARN] BOOST GRAND failed on frame {frame.frame_id} at snap={snapshot_iter}: {e}")
+            res2 = None
+
+        if res2 is not None:
+            _copy_missing_result_attrs(res2, res, _STAGE2_BOOST_COPY_ATTRS)
+            attempts.append(res2)
+            res = res2
+
+    return res, attempts
+
+
+
+def _aggregate_stage2_attempts(
+    final_res: ClusterGrandResult,
+    attempts: Sequence[ClusterGrandResult],
+    snapshot_schedule: Sequence[int],
+    snapshot_attempts_count: int,
+    snapshot_success_iter: int,
+    snapshot_last_iter: int,
+) -> ClusterGrandResult:
+    """Aggregate counters across repeated stage-2 invocations.
+
+    The returned object keeps success/failure and final error counts from the *last*
+    attempt that mattered, but accumulates stage-2 work counters across all attempts.
+    """
+    agg = copy.deepcopy(final_res)
+
+    for attr in _STAGE2_SUM_ATTRS:
+        total = 0
+        for res in attempts:
+            try:
+                total += int(getattr(res, attr, 0) or 0)
+            except Exception:
+                pass
+        setattr(agg, attr, total)
+
+    for attr in _STAGE2_MAX_ATTRS:
+        val = 0
+        for res in attempts:
+            try:
+                val = max(val, int(getattr(res, attr, 0) or 0))
+            except Exception:
+                pass
+        setattr(agg, attr, val)
+
+    setattr(agg, "snapshot_attempts_count", int(snapshot_attempts_count))
+    setattr(agg, "snapshot_success_iter", int(snapshot_success_iter))
+    setattr(agg, "snapshot_last_iter", int(snapshot_last_iter))
+    setattr(agg, "snapshot_schedule_used", np.asarray(list(snapshot_schedule), dtype=np.int32))
+    return agg
+
+
 
 def run_hybrid_ldpc_grand_adaptive(
     sim_cfg: SimulationConfig,
     dec_cfg_stage1: DecoderConfig,
     grand_cfg: ClusterGrandConfig,
-    snapshot_iter: int,
+    snapshot_iter: Any,
     mc_cfg: AdaptiveMCConfig,
     rng_seed: Optional[int] = None,
     label: Optional[str] = None,
@@ -6913,24 +7163,20 @@ def run_hybrid_ldpc_grand_adaptive(
 
       Stage-1: LDPC (normalized min-sum) with early stopping, up to max_iters.
       Stage-2: If stage-1 does NOT converge (syndrome != 0),
-               run GRAND over the union-of-clusters induced by the snapshot syndrome
-               at iteration = snapshot_iter.
+               run GRAND over one or more LDPC snapshots. Earlier snapshots are
+               often easier to rescue because the residual is still localized, so
+               the schedule can probe several iterations before the final stage-1
+               snapshot.
 
     Hardware timing model:
       - NO CPU wall-time is used.
       - Stage-1 cycles are computed from iter_used and the code edge count.
-        The last VN->CN pass is charged iff the software executed it:
-           * early_stop=False  -> always executed
-           * early_stop=True   -> executed only if the stage-1 decode did NOT converge
-                                (syn_w != 0).
-      - Stage-2 cycles use the *evaluated* (batch-true) GRAND counters:
-            total_v2c_edge_visits_evaluated
-            total_unique_checks_toggled_evaluated
-            num_batches_evaluated
-        plus GRAND front-end metadata:
-            llr_sort_len, search_size, patterns_generated, sum_pattern_weights_generated,
-            cluster_unsat_edges, cluster_pair_edges, positions_packed_evaluated.
+        The last VN->CN pass is charged iff the software executed it.
+      - Stage-2 cycles are summed exactly across repeated snapshot tries and boost tries.
     """
+    snapshot_schedule = _normalize_snapshot_schedule(snapshot_iter)
+    primary_snapshot_iter = int(snapshot_schedule[-1])
+
     if hw_model is None:
         hw_model = HW_MODEL
 
@@ -6938,10 +7184,11 @@ def run_hybrid_ldpc_grand_adaptive(
         grand_cfg_boost = grand_cfg_awgn_boost
 
     if label is None:
-        label = f"hyb: LDPC({dec_cfg_stage1.max_iters})+GRAND (snap={snapshot_iter})"
+        snap_desc = str(primary_snapshot_iter) if len(snapshot_schedule) == 1 else ",".join(str(x) for x in snapshot_schedule)
+        label = f"hyb: LDPC({dec_cfg_stage1.max_iters})+GRAND (snap={snap_desc})"
 
     if rng_seed is None:
-        rng_seed = sim_cfg.rng_seed_global + 900 + int(snapshot_iter)
+        rng_seed = sim_cfg.rng_seed_global + 900 + primary_snapshot_iter
 
     rng = np.random.default_rng(rng_seed)
 
@@ -6949,16 +7196,13 @@ def run_hybrid_ldpc_grand_adaptive(
     max_frames = int(mc_cfg.max_frames)
     target_fe = int(mc_cfg.target_frame_errors)
 
-    # ---- Stage-1 (LDPC) stats ----
     total_bit_errs_stage1 = 0
     frame_errs_stage1 = 0
     total_iters_stage1 = 0
 
-    # ---- Final (LDPC+GRAND) stats ----
     total_bit_errs_after = 0
     frame_errs_after = 0
 
-    # ---- Hardware cycles ----
     total_hw_cycles_stage1 = 0
     total_hw_cycles_grand = 0
     total_hw_cycles_total = 0
@@ -6970,7 +7214,6 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_hw_cycles_grand = []
     per_frame_hw_cycles_total = []
 
-    # GRAND logs (evaluated workload + front-end)
     per_frame_patterns_tested = []
     per_frame_patterns_evaluated = []
     per_frame_grand_edge_visits_eval = []
@@ -6984,19 +7227,16 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_cluster_unsat_edges = []
     per_frame_cluster_pair_edges = []
 
-    # Optional Receiver-3/pre-solver logs
     per_frame_pre_solver_attempted = []
     per_frame_pre_solver_success = []
     per_frame_peel_candidate_size = []
     per_frame_peel_residual_vars = []
     per_frame_peel_dense_xor_ops = []
 
-    # Optional Receiver-4 / Chase-list logs
     per_frame_chase_candidate_size = []
     per_frame_chase_candidates_tested = []
     per_frame_chase_total_ldpc_iters = []
 
-    # Optional Receiver-5 / OSD + anchored-restart logs
     per_frame_osd_candidate_size = []
     per_frame_osd_candidates_tested = []
     per_frame_osd_free_dim = []
@@ -7004,6 +7244,10 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_restart_total_ldpc_iters = []
     per_frame_restart_anchor_bits_total = []
     per_frame_disagreement_added = []
+
+    per_frame_snapshot_attempts = []
+    per_frame_snapshot_success_iter = []
+    per_frame_snapshot_last_iter = []
 
     n_frames = 0
     frame_id = 0
@@ -7014,10 +7258,7 @@ def run_hybrid_ldpc_grand_adaptive(
         if frame_errs_after >= target_fe:
             break
 
-        # ---- Generate frame ----
         frame = run_single_frame(sim_cfg, frame_id, rng)
-
-        # ---- Stage-1 LDPC ----
         ldpc_min_sum_decoder_frame(frame, sim_cfg, dec_cfg_stage1)
 
         it1 = int(frame.iter_used if frame.iter_used is not None else 0)
@@ -7033,9 +7274,7 @@ def run_hybrid_ldpc_grand_adaptive(
         stage1_failed = (syn_w != 0)
         per_frame_stage1_failed.append(bool(stage1_failed))
 
-        # ---- Stage-1 HW cycles ----
         final_vn2cn_executed_stage1 = bool((not dec_cfg_stage1.early_stop) or (syn_w != 0))
-
         hw_c_stage1 = ldpc_hw_cycles_frame(
             it1,
             sim_cfg.code,
@@ -7043,11 +7282,9 @@ def run_hybrid_ldpc_grand_adaptive(
             final_vn2cn_executed=final_vn2cn_executed_stage1,
         )
 
-        # Defaults for stage-2
         hw_c_grand = 0
         be_after = be1
 
-        # Defaults for GRAND logs
         pt = 0
         pe = 0
         evis = 0
@@ -7079,80 +7316,52 @@ def run_hybrid_ldpc_grand_adaptive(
         restart_anchor_bits = 0
         disagree_added = 0
 
-        # ---- Stage-2 GRAND ----
+        snapshot_attempts = 0
+        snapshot_success_iter = 0
+        snapshot_last_iter = 0
+
         if stage1_failed:
-            try:
-                res = run_local_rescue_with_optional_presolver(
+            attempt_results: List[ClusterGrandResult] = []
+            res_final: Optional[ClusterGrandResult] = None
+
+            for snap in snapshot_schedule:
+                snap_i = int(snap)
+                snapshot_attempts += 1
+                snapshot_last_iter = snap_i
+
+                res_snap, res_attempts = _run_stage2_single_snapshot(
                     frame=frame,
                     sim_cfg=sim_cfg,
-                    snapshot_iter=int(snapshot_iter),
-                    cfg=grand_cfg,
+                    snapshot_iter=snap_i,
+                    grand_cfg=grand_cfg,
+                    grand_cfg_boost=grand_cfg_boost,
                 )
-            except Exception as e:
-                print(f"[WARN] GRAND failed to run on frame {frame_id} at snap={snapshot_iter}: {e}")
-                res = None
 
-            # If the first GRAND attempt exhausted its search and failed, optionally boost.
-            if (res is not None) and (not bool(res.success)) and (grand_cfg_boost is not None):
-                pt1 = int(getattr(res, "patterns_tested", 0))
-                pg1 = int(getattr(res, "patterns_generated", 0))
-                cap1 = int(getattr(grand_cfg, "max_patterns", pt1))
+                for res_try in res_attempts:
+                    setattr(res_try, "snapshot_iter_used", snap_i)
+                    hw_c_grand += grand_hw_cycles_from_result(res_try, sim_cfg, hw_model)
+                attempt_results.extend(res_attempts)
 
-                exhausted = (pg1 > 0) and (pt1 >= min(pg1, cap1))
+                if res_snap is not None:
+                    res_final = res_snap
+                    if bool(res_snap.success):
+                        snapshot_success_iter = snap_i
+                        break
 
-                if exhausted:
-                    try:
-                        res2 = run_local_rescue_with_optional_presolver(
-                            frame=frame,
-                            sim_cfg=sim_cfg,
-                            snapshot_iter=int(snapshot_iter),
-                            cfg=grand_cfg_boost,
-                        )
-                    except Exception as e:
-                        print(f"[WARN] BOOST GRAND failed on frame {frame_id} at snap={snapshot_iter}: {e}")
-                        res2 = None
-
-                    if res2 is not None:
-                        # Preserve pre-solver / chase metadata from the first attempt when the boost path
-                        # intentionally skips those front-ends.
-                        for attr in [
-                            "pre_solver_mode_used", "pre_solver_attempted", "pre_solver_success",
-                            "peel_candidate_size", "peel_residual_vars", "peel_residual_rows",
-                            "peel_edge_work", "peel_dense_xor_ops", "peel_free_dim", "peel_extra_llr_added",
-                            "chase_candidate_size", "chase_core_size", "chase_patterns_considered",
-                            "chase_candidates_tested", "chase_score_edge_visits", "chase_score_checks_toggled",
-                            "chase_score_sum_pattern_weights", "chase_ldpc_total_iters",
-                            "chase_ldpc_num_runs", "chase_ldpc_num_nonconverged", "chase_best_syndrome_weight",
-                            "osd_candidate_size", "osd_matrix_rows", "osd_free_dim", "osd_enum_bits_used",
-                            "osd_basis_xor_ops", "osd_candidates_considered", "osd_candidates_tested",
-                            "osd_sum_candidate_weights", "restart_num_runs", "restart_total_ldpc_iters",
-                            "restart_num_nonconverged", "restart_anchor_bits_total", "restart_best_syndrome_weight",
-                            "llr_source_used", "selection_mode_used", "sv_seeded_count", "sv_neighbor_visits", "sv_score_len", "disagreement_added",
-                        ]:
-                            if hasattr(res, attr) and (not hasattr(res2, attr) or getattr(res2, attr) in (0, "", "none", None)):
-                                setattr(res2, attr, getattr(res, attr))
-
-                        # Combine HW cycles (you actually executed both searches)
-                        hw_c_grand = grand_hw_cycles_from_result(res,  sim_cfg, hw_model) +                                     grand_hw_cycles_from_result(res2, sim_cfg, hw_model)
-
-                        # Combine logs (so tails reflect total work)
-                        pt2 = int(getattr(res2, "patterns_tested", 0))
-                        pe2 = int(getattr(res2, "patterns_evaluated", pt2))
-
-                        pt = int(getattr(res, "patterns_tested", 0)) + pt2
-                        pe = int(getattr(res, "patterns_evaluated", int(getattr(res, "patterns_tested", 0)))) + pe2
-
-                        # Prefer boosted result for success/failure
-                        if bool(res2.success):
-                            be_after = int(res2.final_bit_errors)
-                        else:
-                            be_after = be1
-
-                        # Replace res with res2 so metadata below reflects the boosted attempt
-                        res = res2
+            res = None
+            if (res_final is not None) and attempt_results:
+                res = _aggregate_stage2_attempts(
+                    final_res=res_final,
+                    attempts=attempt_results,
+                    snapshot_schedule=snapshot_schedule,
+                    snapshot_attempts_count=snapshot_attempts,
+                    snapshot_success_iter=snapshot_success_iter,
+                    snapshot_last_iter=snapshot_last_iter,
+                )
+            elif res_final is not None:
+                res = res_final
 
             if res is not None:
-                # If hw_c_grand wasn't already set by the boost-combine path, compute it
                 if hw_c_grand == 0:
                     hw_c_grand = grand_hw_cycles_from_result(res, sim_cfg, hw_model)
 
@@ -7161,42 +7370,26 @@ def run_hybrid_ldpc_grand_adaptive(
                 else:
                     be_after = be1
 
-                # Logs (evaluated workload is the correct one for hardware time)
-                if pt == 0:
-                    pt = int(getattr(res, "patterns_tested", 0))
-                if pe == 0:
-                    pe = int(getattr(res, "patterns_evaluated", pt))
-
-                evis = int(getattr(res, "total_v2c_edge_visits_evaluated",
-                                getattr(res, "total_v2c_edge_visits", 0)))
-                ctog = int(getattr(res, "total_unique_checks_toggled_evaluated",
-                                getattr(res, "total_unique_checks_toggled", 0)))
+                pt = int(getattr(res, "patterns_tested", 0))
+                pe = int(getattr(res, "patterns_evaluated", pt))
+                evis = int(getattr(res, "total_v2c_edge_visits_evaluated", getattr(res, "total_v2c_edge_visits", 0)))
+                ctog = int(getattr(res, "total_unique_checks_toggled_evaluated", getattr(res, "total_unique_checks_toggled", 0)))
                 nb = int(getattr(res, "num_batches_evaluated", 0))
-
-                # Front-end meta (from the final attempt)
                 llrs = int(getattr(res, "llr_sort_len", 0))
                 ss = int(getattr(res, "search_size", 0))
                 pg = int(getattr(res, "patterns_generated", 0))
                 sw = int(getattr(res, "sum_pattern_weights_generated", 0))
                 posp = int(getattr(res, "positions_packed_evaluated", 0))
-
-                # Cluster proxies
                 cu_e = int(getattr(res, "cluster_unsat_edges", 0))
                 cu_p = int(getattr(res, "cluster_pair_edges", 0))
-
-                # Optional Receiver-3 / pre-solver metadata
                 ps_attempt = int(getattr(res, "pre_solver_attempted", 0))
                 ps_success = int(getattr(res, "pre_solver_success", 0))
                 peel_cand = int(getattr(res, "peel_candidate_size", 0))
                 peel_res_vars = int(getattr(res, "peel_residual_vars", 0))
                 peel_xor = int(getattr(res, "peel_dense_xor_ops", 0))
-
-                # Optional Receiver-4 / Chase-list metadata
                 chase_cand = int(getattr(res, "chase_candidate_size", 0))
                 chase_tested = int(getattr(res, "chase_candidates_tested", 0))
                 chase_ldpc_iters = int(getattr(res, "chase_ldpc_total_iters", 0))
-
-                # Optional Receiver-5 / OSD + anchored-restart metadata
                 osd_cand = int(getattr(res, "osd_candidate_size", 0))
                 osd_tested = int(getattr(res, "osd_candidates_tested", 0))
                 osd_free = int(getattr(res, "osd_free_dim", 0))
@@ -7204,8 +7397,10 @@ def run_hybrid_ldpc_grand_adaptive(
                 restart_iters = int(getattr(res, "restart_total_ldpc_iters", 0))
                 restart_anchor_bits = int(getattr(res, "restart_anchor_bits_total", 0))
                 disagree_added = int(getattr(res, "disagreement_added", 0))
+                snapshot_attempts = int(getattr(res, "snapshot_attempts_count", snapshot_attempts))
+                snapshot_success_iter = int(getattr(res, "snapshot_success_iter", snapshot_success_iter))
+                snapshot_last_iter = int(getattr(res, "snapshot_last_iter", snapshot_last_iter))
 
-        # ---- Accumulate final stats ----
         total_bit_errs_after += be_after
         if be_after > 0:
             frame_errs_after += 1
@@ -7225,26 +7420,21 @@ def run_hybrid_ldpc_grand_adaptive(
         per_frame_grand_edge_visits_eval.append(evis)
         per_frame_grand_checks_toggled_eval.append(ctog)
         per_frame_grand_num_batches.append(nb)
-
         per_frame_grand_llr_sort_len.append(llrs)
         per_frame_grand_search_size.append(ss)
         per_frame_grand_patterns_generated.append(pg)
         per_frame_grand_sumw_generated.append(sw)
         per_frame_grand_positions_packed.append(posp)
-
         per_frame_cluster_unsat_edges.append(cu_e)
         per_frame_cluster_pair_edges.append(cu_p)
-
         per_frame_pre_solver_attempted.append(ps_attempt)
         per_frame_pre_solver_success.append(ps_success)
         per_frame_peel_candidate_size.append(peel_cand)
         per_frame_peel_residual_vars.append(peel_res_vars)
         per_frame_peel_dense_xor_ops.append(peel_xor)
-
         per_frame_chase_candidate_size.append(chase_cand)
         per_frame_chase_candidates_tested.append(chase_tested)
         per_frame_chase_total_ldpc_iters.append(chase_ldpc_iters)
-
         per_frame_osd_candidate_size.append(osd_cand)
         per_frame_osd_candidates_tested.append(osd_tested)
         per_frame_osd_free_dim.append(osd_free)
@@ -7252,6 +7442,9 @@ def run_hybrid_ldpc_grand_adaptive(
         per_frame_restart_total_ldpc_iters.append(restart_iters)
         per_frame_restart_anchor_bits_total.append(restart_anchor_bits)
         per_frame_disagreement_added.append(disagree_added)
+        per_frame_snapshot_attempts.append(int(snapshot_attempts))
+        per_frame_snapshot_success_iter.append(int(snapshot_success_iter))
+        per_frame_snapshot_last_iter.append(int(snapshot_last_iter))
 
         n_frames += 1
         frame_id += 1
@@ -7273,18 +7466,16 @@ def run_hybrid_ldpc_grand_adaptive(
             "avg_hw_time_grand_us_per_frame": 0.0,
             "avg_hw_time_total_us_per_frame": 0.0,
             "hw_model": asdict(hw_model),
+            "grand_snapshot_schedule": np.asarray(snapshot_schedule, dtype=np.int32),
         }
 
-    # Stage-1 metrics
     ber_ldpc = total_bit_errs_stage1 / (n_frames * N)
     fer_ldpc = frame_errs_stage1 / n_frames
     avg_iters_stage1 = total_iters_stage1 / n_frames
 
-    # Final metrics
     ber_after = total_bit_errs_after / (n_frames * N)
     fer_after = frame_errs_after / n_frames
 
-    # HW averages
     avg_hw_cycles_stage1 = total_hw_cycles_stage1 / n_frames
     avg_hw_cycles_grand = total_hw_cycles_grand / n_frames
     avg_hw_cycles_total = total_hw_cycles_total / n_frames
@@ -7311,65 +7502,42 @@ def run_hybrid_ldpc_grand_adaptive(
         "label": label,
         "snr_db": float(sim_cfg.channel.snr_db),
         "n_frames": int(n_frames),
-
-        # Stage-1 only
         "ber_ldpc": float(ber_ldpc),
         "fer_ldpc": float(fer_ldpc),
         "ldpc_iters_hybrid_avg": float(avg_iters_stage1),
-
-        # Final hybrid
         "ber_after": float(ber_after),
         "fer_after": float(fer_after),
-
-        # HW averages
         "avg_hw_cycles_stage1_per_frame": float(avg_hw_cycles_stage1),
         "avg_hw_cycles_grand_per_frame": float(avg_hw_cycles_grand),
         "avg_hw_cycles_total_per_frame": float(avg_hw_cycles_total),
-
         "avg_hw_time_stage1_us_per_frame": float(avg_hw_time_stage1_us),
         "avg_hw_time_grand_us_per_frame": float(avg_hw_time_grand_us),
         "avg_hw_time_total_us_per_frame": float(avg_hw_time_total_us),
-
-        # Per-frame HW cycles
         "per_frame_hw_cycles_stage1": np.array(per_frame_hw_cycles_stage1, dtype=np.int64),
         "per_frame_hw_cycles_grand": np.array(per_frame_hw_cycles_grand, dtype=np.int64),
         "per_frame_hw_cycles_total": np.array(per_frame_hw_cycles_total, dtype=np.int64),
-
-        # Per-frame stage-1 logs
         "per_frame_iters_stage1": np.array(per_frame_iters_stage1, dtype=np.int32),
         "per_frame_stage1_failed": np.array(per_frame_stage1_failed, dtype=np.bool_),
-
-        # Per-frame GRAND logs (evaluated)
         "per_frame_patterns_tested": np.array(per_frame_patterns_tested, dtype=np.int32),
         "per_frame_patterns_evaluated": np.array(per_frame_patterns_evaluated, dtype=np.int32),
         "per_frame_grand_edge_visits_evaluated": np.array(per_frame_grand_edge_visits_eval, dtype=np.int64),
         "per_frame_grand_checks_toggled_evaluated": np.array(per_frame_grand_checks_toggled_eval, dtype=np.int64),
         "per_frame_grand_num_batches_evaluated": np.array(per_frame_grand_num_batches, dtype=np.int32),
-
-        # Front-end meta
         "per_frame_grand_llr_sort_len": np.array(per_frame_grand_llr_sort_len, dtype=np.int32),
         "per_frame_grand_search_size": np.array(per_frame_grand_search_size, dtype=np.int32),
         "per_frame_grand_patterns_generated": np.array(per_frame_grand_patterns_generated, dtype=np.int64),
         "per_frame_grand_sum_pattern_weights_generated": np.array(per_frame_grand_sumw_generated, dtype=np.int64),
         "per_frame_grand_positions_packed_evaluated": np.array(per_frame_grand_positions_packed, dtype=np.int64),
-
-        # Cluster proxies
         "per_frame_cluster_unsat_edges": np.array(per_frame_cluster_unsat_edges, dtype=np.int64),
         "per_frame_cluster_pair_edges": np.array(per_frame_cluster_pair_edges, dtype=np.int64),
-
-        # Optional Receiver-3 / pre-solver logs
         "per_frame_pre_solver_attempted": np.array(per_frame_pre_solver_attempted, dtype=np.int8),
         "per_frame_pre_solver_success": np.array(per_frame_pre_solver_success, dtype=np.int8),
         "per_frame_peel_candidate_size": np.array(per_frame_peel_candidate_size, dtype=np.int32),
         "per_frame_peel_residual_vars": np.array(per_frame_peel_residual_vars, dtype=np.int32),
         "per_frame_peel_dense_xor_ops": np.array(per_frame_peel_dense_xor_ops, dtype=np.int64),
-
-        # Optional Receiver-4 / Chase-list logs
         "per_frame_chase_candidate_size": np.array(per_frame_chase_candidate_size, dtype=np.int32),
         "per_frame_chase_candidates_tested": np.array(per_frame_chase_candidates_tested, dtype=np.int32),
         "per_frame_chase_total_ldpc_iters": np.array(per_frame_chase_total_ldpc_iters, dtype=np.int32),
-
-        # Optional Receiver-5 / OSD + anchored-restart logs
         "per_frame_osd_candidate_size": np.array(per_frame_osd_candidate_size, dtype=np.int32),
         "per_frame_osd_candidates_tested": np.array(per_frame_osd_candidates_tested, dtype=np.int32),
         "per_frame_osd_free_dim": np.array(per_frame_osd_free_dim, dtype=np.int32),
@@ -7377,8 +7545,9 @@ def run_hybrid_ldpc_grand_adaptive(
         "per_frame_restart_total_ldpc_iters": np.array(per_frame_restart_total_ldpc_iters, dtype=np.int32),
         "per_frame_restart_anchor_bits_total": np.array(per_frame_restart_anchor_bits_total, dtype=np.int32),
         "per_frame_disagreement_added": np.array(per_frame_disagreement_added, dtype=np.int32),
-
-        # Stage-2 configuration (kept in the raw pickle; CSV summaries stay unchanged)
+        "per_frame_snapshot_attempts": np.array(per_frame_snapshot_attempts, dtype=np.int32),
+        "per_frame_snapshot_success_iter": np.array(per_frame_snapshot_success_iter, dtype=np.int32),
+        "per_frame_snapshot_last_iter": np.array(per_frame_snapshot_last_iter, dtype=np.int32),
         "grand_selection_mode": str(getattr(grand_cfg, "selection_mode", "llr")),
         "grand_llr_source": str(getattr(grand_cfg, "llr_source", "posterior")),
         "grand_sv_check_cover_k": int(getattr(grand_cfg, "sv_check_cover_k", 0)),
@@ -7386,15 +7555,10 @@ def run_hybrid_ldpc_grand_adaptive(
         "grand_pre_solver_mode": str(getattr(grand_cfg, "pre_solver_mode", "none")),
         "grand_peel_candidate_ratio": float(getattr(grand_cfg, "peel_candidate_ratio", 1.0)),
         "grand_peel_max_bits": int(getattr(grand_cfg, "peel_max_bits", 0) or 0),
-
+        "grand_snapshot_schedule": np.asarray(snapshot_schedule, dtype=np.int32),
+        "grand_snapshot_metrics_are_cumulative": True,
         "hw_model": asdict(hw_model),
     }
-
-
-
-
-
-
 ### CELL number 30-B ##########################################################################################################################
 # Publication-run overrides (multi-SNR + realistic adaptive MC stopping)
 # Stop rule per SNR: 200 frame errors OR 160000 frames cap.
@@ -8284,12 +8448,14 @@ def run_awgn_sweep_for_code(
     
 
     base_seed = _env_int("RNG_SEED_GLOBAL", 12345) + _stable_u32_seed_from_string(code_cfg.code_name)
+    run_receiver1 = bool(_env_int("RUN_RECEIVER1", 1))
     run_receiver2 = bool(_env_int("RUN_RECEIVER2", 0))
     run_receiver3 = bool(_env_int("RUN_RECEIVER3", 0))
     run_receiver4 = bool(_env_int("RUN_RECEIVER4", 0))
     run_receiver5 = bool(_env_int("RUN_RECEIVER5", 0))
     run_receiver6 = bool(_env_int("RUN_RECEIVER6", 0))
     run_receiver7 = bool(_env_int("RUN_RECEIVER7", 0))
+    pair_decoder_streams = bool(_env_int("PAIR_DECODER_STREAMS", 0))
 
     results: Dict[float, Dict[str, Any]] = {}
 
@@ -8318,6 +8484,13 @@ def run_awgn_sweep_for_code(
             except Exception:
                 pass
 
+        snr_seed_common = int((base_seed + int(round(snr_db * 100.0))) & 0xFFFFFFFF)
+
+        def _decoder_seed(family_offset: int, it: int) -> int:
+            if pair_decoder_streams:
+                return snr_seed_common
+            return int((base_seed + int(family_offset) + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+
         # LDPC-only sim config (no snapshots needed)
         sim_cfg_ldpc = SimulationConfig(
             code=code_cfg,
@@ -8332,7 +8505,7 @@ def run_awgn_sweep_for_code(
         # Scenario 1: Legacy LDPC-only baselines (no GRAND)
         for it in ldpc_list:
             dec_name = f"ldpc{int(it)}"
-            seed = int((base_seed + 1_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+            seed = _decoder_seed(1_000, int(it))
             dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
             per_snr[dec_name] = run_ldpc_min_sum_adaptive(
                 sim_cfg=sim_cfg_ldpc,
@@ -8343,35 +8516,11 @@ def run_awgn_sweep_for_code(
             )
 
         # Scenario 3: Complete hybrid (Receiver 1 = LLR-ranked GRAND rescue)
-        for it in stage1_list:
-            dec_name = f"hyb{int(it)}"
-            seed = int((base_seed + 10_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
-            dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
-
-            sim_cfg_hyb = SimulationConfig(
-                code=code_cfg,
-                channel=ChannelConfig(name=channel_name, snr_db=snr_db),
-                interleaver=interleaver,
-                rng_seed_global=int(base_seed),
-                snapshot_iters=[int(it)],  # snapshot only what GRAND needs
-            )
-
-            per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
-                sim_cfg=sim_cfg_hyb,
-                dec_cfg_stage1=dec_cfg,
-                grand_cfg=grand_cfg_awgn,
-                snapshot_iter=int(it),
-                mc_cfg=mc_cfg_local,
-                rng_seed=seed,
-                label=dec_name,
-                grand_cfg_boost=(grand_cfg_awgn_boost if GRAND_USE_BOOST else None),
-            )
-
-        # Scenario 4: Receiver 2 (syndrome-vote + check-cover front-end)
-        if run_receiver2:
+        if run_receiver1:
             for it in stage1_list:
-                dec_name = f"hybsv{int(it)}"
-                seed = int((base_seed + 20_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                dec_name = f"hyb{int(it)}"
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(10_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8379,14 +8528,41 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],  # snapshot only what GRAND needs
+                    snapshot_iters=snapshot_schedule,  # probe several stage-1 snapshots, not just the final one
+                )
+
+                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
+                    sim_cfg=sim_cfg_hyb,
+                    dec_cfg_stage1=dec_cfg,
+                    grand_cfg=grand_cfg_awgn,
+                    snapshot_iter=snapshot_schedule,
+                    mc_cfg=mc_cfg_local,
+                    rng_seed=seed,
+                    label=dec_name,
+                    grand_cfg_boost=(grand_cfg_awgn_boost if GRAND_USE_BOOST else None),
+                )
+
+        # Scenario 4: Receiver 2 (syndrome-vote + check-cover front-end)
+        if run_receiver2:
+            for it in stage1_list:
+                dec_name = f"hybsv{int(it)}"
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(20_000, int(it))
+                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
+
+                sim_cfg_hyb = SimulationConfig(
+                    code=code_cfg,
+                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
+                    interleaver=interleaver,
+                    rng_seed_global=int(base_seed),
+                    snapshot_iters=snapshot_schedule,  # probe several stage-1 snapshots, not just the final one
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_sv,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
@@ -8397,7 +8573,8 @@ def run_awgn_sweep_for_code(
         if run_receiver3:
             for it in stage1_list:
                 dec_name = f"hybptg{int(it)}"
-                seed = int((base_seed + 30_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(30_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8405,14 +8582,14 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],
+                    snapshot_iters=snapshot_schedule,
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_ptg,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
@@ -8423,7 +8600,8 @@ def run_awgn_sweep_for_code(
         if run_receiver4:
             for it in stage1_list:
                 dec_name = f"hybctg{int(it)}"
-                seed = int((base_seed + 40_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(40_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8431,14 +8609,14 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],
+                    snapshot_iters=snapshot_schedule,
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_ctg,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
@@ -8449,7 +8627,8 @@ def run_awgn_sweep_for_code(
         if run_receiver5:
             for it in stage1_list:
                 dec_name = f"hybosd{int(it)}"
-                seed = int((base_seed + 50_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(50_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8457,14 +8636,14 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],
+                    snapshot_iters=snapshot_schedule,
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_osd,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
@@ -8475,7 +8654,8 @@ def run_awgn_sweep_for_code(
         if run_receiver6:
             for it in stage1_list:
                 dec_name = f"hybahr{int(it)}"
-                seed = int((base_seed + 60_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(60_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8483,14 +8663,14 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],
+                    snapshot_iters=snapshot_schedule,
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_ahr,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
@@ -8501,7 +8681,8 @@ def run_awgn_sweep_for_code(
         if run_receiver7:
             for it in stage1_list:
                 dec_name = f"hybbgr{int(it)}"
-                seed = int((base_seed + 70_000 + int(round(snr_db * 100.0)) + int(it)) & 0xFFFFFFFF)
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(70_000, int(it))
                 dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
 
                 sim_cfg_hyb = SimulationConfig(
@@ -8509,14 +8690,14 @@ def run_awgn_sweep_for_code(
                     channel=ChannelConfig(name=channel_name, snr_db=snr_db),
                     interleaver=interleaver,
                     rng_seed_global=int(base_seed),
-                    snapshot_iters=[int(it)],
+                    snapshot_iters=snapshot_schedule,
                 )
 
                 per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
                     sim_cfg=sim_cfg_hyb,
                     dec_cfg_stage1=dec_cfg,
                     grand_cfg=grand_cfg_awgn_bgr,
-                    snapshot_iter=int(it),
+                    snapshot_iter=snapshot_schedule,
                     mc_cfg=mc_cfg_local,
                     rng_seed=seed,
                     label=dec_name,
