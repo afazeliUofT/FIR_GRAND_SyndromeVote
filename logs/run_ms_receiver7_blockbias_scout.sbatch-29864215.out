@@ -1,0 +1,976 @@
+[SBATCH CONFIG] SNR_SWEEP=7.5,8.0,8.5,9.0,9.5,10.0,10.5,11.0
+[SBATCH CONFIG] LDPC_ITERS=8,12,15 STAGE1_ITERS=8,12,15
+[SBATCH CONFIG] PAIR_DECODER_STREAMS=1 GRAND_RESCUE_SNAPSHOT_ITERS=4,8,12,15
+[SBATCH CONFIG] CHANNEL=SIONNA_TDL TDL=B DELAY=5e-7 SPEED=[0.5,3.0] CFO=45.0 CSI_MODE=nr_imperfect
+[SBATCH CONFIG] PILOT_STRIDE=36 EST_SNR=17 PHASE_STD=0.8 AMP_RIPPLE=0.8 BLOCK_SC=48
+[SBATCH CONFIG] RUN_RECEIVER6=1 RUN_RECEIVER7=1
+Numba threads: 64
+[HW model]  {'fclk_mhz': 800, 'ldpc_edges_per_cycle': 64, 'ldpc_bits_per_cycle_hd': 64, 'ldpc_iter_overhead_cycles': 20, 'grand_edges_per_cycle': 64, 'grand_checks_per_cycle': 64, 'grand_batch_overhead_cycles': 200, 'grand_abs_per_cycle': 64, 'grand_sort_elem_log2_per_cycle': 64, 'grand_cost_add_per_cycle': 64, 'grand_patsort_patlog2_per_cycle': 64, 'cluster_pair_edges_per_cycle': 0}
+[RUN_EXPERIMENTS] codes=['sionna5g']  snr_sweep=[7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0]  out_dir=results/run_ms_receiver7_blockbias_scout.sbatch_29864215
+[RUN_EXPERIMENTS] mc_cfg=AdaptiveMCConfig(target_frame_errors=140, min_frames=0, max_frames=220000)
+Fast decoding structures prepared: 20488 edges
+[RUN_EXPERIMENTS] Built code: sionna5g_k1024_n2048_qm1
+[run_awgn_sweep_for_code] SNR-parallel ON: n_jobs=4, threads/worker=16, backend=loky
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 7.50
+Frames simulated              : 213
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.622e-01
+Frame error rate (FER)        : 6.573e-01
+Avg LDPC iterations/frame     : 7.09
+Avg HW cycles/frame           : 10064.41
+Avg HW decode time/frame      : 12.58 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 7.50
+Frames simulated              : 255
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.582e-01
+Frame error rate (FER)        : 5.490e-01
+Avg LDPC iterations/frame     : 9.54
+Avg HW cycles/frame           : 13423.48
+Avg HW decode time/frame      : 16.78 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 7.50
+Frames simulated              : 274
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.551e-01
+Frame error rate (FER)        : 5.109e-01
+Avg LDPC iterations/frame     : 11.15
+Avg HW cycles/frame           : 15655.93
+Avg HW decode time/frame      : 19.57 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 7.50
+Frames simulated              : 290
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.634e-01
+Stage-1 FER                   : 6.483e-01
+Final BER (LDPC+GRAND)        : 1.553e-01
+Final FER (LDPC+GRAND)        : 4.828e-01
+Avg stage-1 iters/frame       : 7.12
+Avg HW time/frame (stage-1)   : 12.62 µs
+Avg HW time/frame (GRAND)     : 3803.88 µs
+Avg HW time/frame (total)     : 3816.50 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 7.50
+Frames simulated              : 292
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.571e-01
+Stage-1 FER                   : 5.445e-01
+Final BER (LDPC+GRAND)        : 1.542e-01
+Final FER (LDPC+GRAND)        : 4.795e-01
+Avg stage-1 iters/frame       : 9.53
+Avg HW time/frame (stage-1)   : 16.76 µs
+Avg HW time/frame (GRAND)     : 5691.67 µs
+Avg HW time/frame (total)     : 5708.43 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 7.50
+Frames simulated              : 292
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.540e-01
+Stage-1 FER                   : 5.068e-01
+Final BER (LDPC+GRAND)        : 1.527e-01
+Final FER (LDPC+GRAND)        : 4.795e-01
+Avg stage-1 iters/frame       : 11.13
+Avg HW time/frame (stage-1)   : 19.53 µs
+Avg HW time/frame (GRAND)     : 7532.91 µs
+Avg HW time/frame (total)     : 7552.45 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 7.50
+Frames simulated              : 255
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.663e-01
+Stage-1 FER                   : 6.588e-01
+Final BER (LDPC+GRAND)        : 1.650e-01
+Final FER (LDPC+GRAND)        : 5.490e-01
+Avg stage-1 iters/frame       : 7.12
+Avg HW time/frame (stage-1)   : 12.63 µs
+Avg HW time/frame (GRAND)     : 5493.06 µs
+Avg HW time/frame (total)     : 5505.68 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 7.50
+Frames simulated              : 257
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.590e-01
+Stage-1 FER                   : 5.525e-01
+Final BER (LDPC+GRAND)        : 1.590e-01
+Final FER (LDPC+GRAND)        : 5.447e-01
+Avg stage-1 iters/frame       : 9.56
+Avg HW time/frame (stage-1)   : 16.81 µs
+Avg HW time/frame (GRAND)     : 7977.58 µs
+Avg HW time/frame (total)     : 7994.39 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 7.50
+Frames simulated              : 284
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.525e-01
+Stage-1 FER                   : 5.035e-01
+Final BER (LDPC+GRAND)        : 1.525e-01
+Final FER (LDPC+GRAND)        : 4.930e-01
+Avg stage-1 iters/frame       : 11.12
+Avg HW time/frame (stage-1)   : 19.50 µs
+Avg HW time/frame (GRAND)     : 9727.02 µs
+Avg HW time/frame (total)     : 9746.53 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 9.50
+Frames simulated              : 285
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.143e-01
+Frame error rate (FER)        : 4.912e-01
+Avg LDPC iterations/frame     : 6.59
+Avg HW cycles/frame           : 9315.34
+Avg HW decode time/frame      : 11.64 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 9.50
+Frames simulated              : 350
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.102e-01
+Frame error rate (FER)        : 4.000e-01
+Avg LDPC iterations/frame     : 8.41
+Avg HW cycles/frame           : 11815.84
+Avg HW decode time/frame      : 14.77 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 9.50
+Frames simulated              : 397
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.009e-01
+Frame error rate (FER)        : 3.526e-01
+Avg LDPC iterations/frame     : 9.43
+Avg HW cycles/frame           : 13212.48
+Avg HW decode time/frame      : 16.52 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 9.50
+Frames simulated              : 426
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.085e-01
+Stage-1 FER                   : 4.718e-01
+Final BER (LDPC+GRAND)        : 1.002e-01
+Final FER (LDPC+GRAND)        : 3.286e-01
+Avg stage-1 iters/frame       : 6.61
+Avg HW time/frame (stage-1)   : 11.67 µs
+Avg HW time/frame (GRAND)     : 2608.81 µs
+Avg HW time/frame (total)     : 2620.48 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 9.50
+Frames simulated              : 430
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.023e-01
+Stage-1 FER                   : 3.767e-01
+Final BER (LDPC+GRAND)        : 9.833e-02
+Final FER (LDPC+GRAND)        : 3.256e-01
+Avg stage-1 iters/frame       : 8.32
+Avg HW time/frame (stage-1)   : 14.59 µs
+Avg HW time/frame (GRAND)     : 3872.86 µs
+Avg HW time/frame (total)     : 3887.45 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 9.50
+Frames simulated              : 437
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.006e-01
+Stage-1 FER                   : 3.501e-01
+Final BER (LDPC+GRAND)        : 9.729e-02
+Final FER (LDPC+GRAND)        : 3.204e-01
+Avg stage-1 iters/frame       : 9.41
+Avg HW time/frame (stage-1)   : 16.48 µs
+Avg HW time/frame (GRAND)     : 5104.68 µs
+Avg HW time/frame (total)     : 5121.16 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 9.50
+Frames simulated              : 356
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.138e-01
+Stage-1 FER                   : 4.775e-01
+Final BER (LDPC+GRAND)        : 1.119e-01
+Final FER (LDPC+GRAND)        : 3.933e-01
+Avg stage-1 iters/frame       : 6.62
+Avg HW time/frame (stage-1)   : 11.68 µs
+Avg HW time/frame (GRAND)     : 3903.35 µs
+Avg HW time/frame (total)     : 3915.03 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 9.50
+Frames simulated              : 380
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.043e-01
+Stage-1 FER                   : 3.842e-01
+Final BER (LDPC+GRAND)        : 1.042e-01
+Final FER (LDPC+GRAND)        : 3.684e-01
+Avg stage-1 iters/frame       : 8.34
+Avg HW time/frame (stage-1)   : 14.63 µs
+Avg HW time/frame (GRAND)     : 5441.76 µs
+Avg HW time/frame (total)     : 5456.39 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 9.50
+Frames simulated              : 411
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 9.946e-02
+Stage-1 FER                   : 3.479e-01
+Final BER (LDPC+GRAND)        : 9.945e-02
+Final FER (LDPC+GRAND)        : 3.406e-01
+Avg stage-1 iters/frame       : 9.41
+Avg HW time/frame (stage-1)   : 16.48 µs
+Avg HW time/frame (GRAND)     : 6697.67 µs
+Avg HW time/frame (total)     : 6714.15 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 8.00
+Frames simulated              : 238
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.287e-01
+Frame error rate (FER)        : 5.882e-01
+Avg LDPC iterations/frame     : 7.15
+Avg HW cycles/frame           : 10116.09
+Avg HW decode time/frame      : 12.65 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 8.00
+Frames simulated              : 310
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.246e-01
+Frame error rate (FER)        : 4.516e-01
+Avg LDPC iterations/frame     : 9.27
+Avg HW cycles/frame           : 13017.86
+Avg HW decode time/frame      : 16.27 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 8.00
+Frames simulated              : 356
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.127e-01
+Frame error rate (FER)        : 3.933e-01
+Avg LDPC iterations/frame     : 10.35
+Avg HW cycles/frame           : 14507.85
+Avg HW decode time/frame      : 18.13 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 8.00
+Frames simulated              : 383
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.281e-01
+Stage-1 FER                   : 5.875e-01
+Final BER (LDPC+GRAND)        : 1.173e-01
+Final FER (LDPC+GRAND)        : 3.655e-01
+Avg stage-1 iters/frame       : 7.11
+Avg HW time/frame (stage-1)   : 12.58 µs
+Avg HW time/frame (GRAND)     : 2912.35 µs
+Avg HW time/frame (total)     : 2924.93 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 8.00
+Frames simulated              : 386
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.190e-01
+Stage-1 FER                   : 4.352e-01
+Final BER (LDPC+GRAND)        : 1.156e-01
+Final FER (LDPC+GRAND)        : 3.627e-01
+Avg stage-1 iters/frame       : 9.15
+Avg HW time/frame (stage-1)   : 16.05 µs
+Avg HW time/frame (GRAND)     : 4313.66 µs
+Avg HW time/frame (total)     : 4329.71 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 8.00
+Frames simulated              : 389
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.151e-01
+Stage-1 FER                   : 3.985e-01
+Final BER (LDPC+GRAND)        : 1.139e-01
+Final FER (LDPC+GRAND)        : 3.599e-01
+Avg stage-1 iters/frame       : 10.41
+Avg HW time/frame (stage-1)   : 18.24 µs
+Avg HW time/frame (GRAND)     : 5744.67 µs
+Avg HW time/frame (total)     : 5762.91 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 8.00
+Frames simulated              : 318
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.322e-01
+Stage-1 FER                   : 5.975e-01
+Final BER (LDPC+GRAND)        : 1.296e-01
+Final FER (LDPC+GRAND)        : 4.403e-01
+Avg stage-1 iters/frame       : 7.12
+Avg HW time/frame (stage-1)   : 12.60 µs
+Avg HW time/frame (GRAND)     : 4534.46 µs
+Avg HW time/frame (total)     : 4547.06 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 8.00
+Frames simulated              : 333
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.217e-01
+Stage-1 FER                   : 4.444e-01
+Final BER (LDPC+GRAND)        : 1.217e-01
+Final FER (LDPC+GRAND)        : 4.204e-01
+Avg stage-1 iters/frame       : 9.18
+Avg HW time/frame (stage-1)   : 16.11 µs
+Avg HW time/frame (GRAND)     : 6226.84 µs
+Avg HW time/frame (total)     : 6242.95 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 8.00
+Frames simulated              : 359
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.137e-01
+Stage-1 FER                   : 3.955e-01
+Final BER (LDPC+GRAND)        : 1.137e-01
+Final FER (LDPC+GRAND)        : 3.900e-01
+Avg stage-1 iters/frame       : 10.37
+Avg HW time/frame (stage-1)   : 18.16 µs
+Avg HW time/frame (GRAND)     : 7629.87 µs
+Avg HW time/frame (total)     : 7648.03 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 10.50
+Frames simulated              : 358
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 8.052e-02
+Frame error rate (FER)        : 3.911e-01
+Avg LDPC iterations/frame     : 6.31
+Avg HW cycles/frame           : 8890.20
+Avg HW decode time/frame      : 11.11 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 10.50
+Frames simulated              : 480
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 7.581e-02
+Frame error rate (FER)        : 2.917e-01
+Avg LDPC iterations/frame     : 7.74
+Avg HW cycles/frame           : 10841.01
+Avg HW decode time/frame      : 13.55 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 10.50
+Frames simulated              : 522
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 7.460e-02
+Frame error rate (FER)        : 2.682e-01
+Avg LDPC iterations/frame     : 8.70
+Avg HW cycles/frame           : 12166.67
+Avg HW decode time/frame      : 15.21 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 10.50
+Frames simulated              : 550
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.780e-02
+Stage-1 FER                   : 4.200e-01
+Final BER (LDPC+GRAND)        : 7.865e-02
+Final FER (LDPC+GRAND)        : 2.545e-01
+Avg stage-1 iters/frame       : 6.40
+Avg HW time/frame (stage-1)   : 11.28 µs
+Avg HW time/frame (GRAND)     : 2021.84 µs
+Avg HW time/frame (total)     : 2033.13 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 10.50
+Frames simulated              : 568
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.891e-02
+Stage-1 FER                   : 3.116e-01
+Final BER (LDPC+GRAND)        : 7.619e-02
+Final FER (LDPC+GRAND)        : 2.465e-01
+Avg stage-1 iters/frame       : 7.90
+Avg HW time/frame (stage-1)   : 13.85 µs
+Avg HW time/frame (GRAND)     : 2940.08 µs
+Avg HW time/frame (total)     : 2953.93 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 10.50
+Frames simulated              : 582
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.437e-02
+Stage-1 FER                   : 2.698e-01
+Final BER (LDPC+GRAND)        : 7.326e-02
+Final FER (LDPC+GRAND)        : 2.405e-01
+Avg stage-1 iters/frame       : 8.75
+Avg HW time/frame (stage-1)   : 15.31 µs
+Avg HW time/frame (GRAND)     : 3825.09 µs
+Avg HW time/frame (total)     : 3840.40 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 10.50
+Frames simulated              : 458
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.236e-02
+Stage-1 FER                   : 3.930e-01
+Final BER (LDPC+GRAND)        : 8.103e-02
+Final FER (LDPC+GRAND)        : 3.057e-01
+Avg stage-1 iters/frame       : 6.31
+Avg HW time/frame (stage-1)   : 11.11 µs
+Avg HW time/frame (GRAND)     : 3032.79 µs
+Avg HW time/frame (total)     : 3043.91 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 10.50
+Frames simulated              : 490
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.712e-02
+Stage-1 FER                   : 3.000e-01
+Final BER (LDPC+GRAND)        : 7.709e-02
+Final FER (LDPC+GRAND)        : 2.857e-01
+Avg stage-1 iters/frame       : 7.79
+Avg HW time/frame (stage-1)   : 13.65 µs
+Avg HW time/frame (GRAND)     : 4263.97 µs
+Avg HW time/frame (total)     : 4277.62 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 10.50
+Frames simulated              : 537
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.524e-02
+Stage-1 FER                   : 2.700e-01
+Final BER (LDPC+GRAND)        : 7.523e-02
+Final FER (LDPC+GRAND)        : 2.607e-01
+Avg stage-1 iters/frame       : 8.76
+Avg HW time/frame (stage-1)   : 15.32 µs
+Avg HW time/frame (GRAND)     : 5187.81 µs
+Avg HW time/frame (total)     : 5203.13 µs
+[save_awgn_results] Wrote raw results : results/run_ms_receiver7_blockbias_scout.sbatch_29864215/sionna_tdl_sionna5g_k1024_n2048_qm1_hybrid_20260326-164156_raw.pkl
+[save_awgn_results] Wrote mean summary: results/run_ms_receiver7_blockbias_scout.sbatch_29864215/sionna_tdl_sionna5g_k1024_n2048_qm1_hybrid_20260326-164156_summary.csv
+[save_awgn_results] Wrote tails summary: results/run_ms_receiver7_blockbias_scout.sbatch_29864215/sionna_tdl_sionna5g_k1024_n2048_qm1_hybrid_20260326-164156_summary_tails.csv
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 9.00
+Frames simulated              : 267
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.208e-01
+Frame error rate (FER)        : 5.243e-01
+Avg LDPC iterations/frame     : 6.81
+Avg HW cycles/frame           : 9626.00
+Avg HW decode time/frame      : 12.03 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 9.00
+Frames simulated              : 336
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.110e-01
+Frame error rate (FER)        : 4.167e-01
+Avg LDPC iterations/frame     : 8.67
+Avg HW cycles/frame           : 12171.75
+Avg HW decode time/frame      : 15.21 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 9.00
+Frames simulated              : 380
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.036e-01
+Frame error rate (FER)        : 3.684e-01
+Avg LDPC iterations/frame     : 9.80
+Avg HW cycles/frame           : 13730.46
+Avg HW decode time/frame      : 17.16 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 9.00
+Frames simulated              : 410
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.202e-01
+Stage-1 FER                   : 5.146e-01
+Final BER (LDPC+GRAND)        : 1.085e-01
+Final FER (LDPC+GRAND)        : 3.415e-01
+Avg stage-1 iters/frame       : 6.77
+Avg HW time/frame (stage-1)   : 11.97 µs
+Avg HW time/frame (GRAND)     : 2727.48 µs
+Avg HW time/frame (total)     : 2739.44 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 9.00
+Frames simulated              : 423
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.077e-01
+Stage-1 FER                   : 4.066e-01
+Final BER (LDPC+GRAND)        : 1.032e-01
+Final FER (LDPC+GRAND)        : 3.310e-01
+Avg stage-1 iters/frame       : 8.61
+Avg HW time/frame (stage-1)   : 15.10 µs
+Avg HW time/frame (GRAND)     : 3972.22 µs
+Avg HW time/frame (total)     : 3987.33 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 9.00
+Frames simulated              : 448
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.001e-01
+Stage-1 FER                   : 3.571e-01
+Final BER (LDPC+GRAND)        : 9.731e-02
+Final FER (LDPC+GRAND)        : 3.125e-01
+Avg stage-1 iters/frame       : 9.69
+Avg HW time/frame (stage-1)   : 16.97 µs
+Avg HW time/frame (GRAND)     : 5049.05 µs
+Avg HW time/frame (total)     : 5066.02 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 9.00
+Frames simulated              : 352
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.182e-01
+Stage-1 FER                   : 5.142e-01
+Final BER (LDPC+GRAND)        : 1.154e-01
+Final FER (LDPC+GRAND)        : 3.977e-01
+Avg stage-1 iters/frame       : 6.78
+Avg HW time/frame (stage-1)   : 11.97 µs
+Avg HW time/frame (GRAND)     : 3994.07 µs
+Avg HW time/frame (total)     : 4006.04 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 9.00
+Frames simulated              : 365
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.072e-01
+Stage-1 FER                   : 4.082e-01
+Final BER (LDPC+GRAND)        : 1.072e-01
+Final FER (LDPC+GRAND)        : 3.836e-01
+Avg stage-1 iters/frame       : 8.62
+Avg HW time/frame (stage-1)   : 15.12 µs
+Avg HW time/frame (GRAND)     : 5720.51 µs
+Avg HW time/frame (total)     : 5735.64 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 9.00
+Frames simulated              : 386
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.039e-01
+Stage-1 FER                   : 3.705e-01
+Final BER (LDPC+GRAND)        : 1.039e-01
+Final FER (LDPC+GRAND)        : 3.627e-01
+Avg stage-1 iters/frame       : 9.82
+Avg HW time/frame (stage-1)   : 17.20 µs
+Avg HW time/frame (GRAND)     : 7159.78 µs
+Avg HW time/frame (total)     : 7176.97 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 11.00
+Frames simulated              : 352
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 7.619e-02
+Frame error rate (FER)        : 3.977e-01
+Avg LDPC iterations/frame     : 6.41
+Avg HW cycles/frame           : 9029.90
+Avg HW decode time/frame      : 11.29 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 11.00
+Frames simulated              : 518
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 6.201e-02
+Frame error rate (FER)        : 2.703e-01
+Avg LDPC iterations/frame     : 7.68
+Avg HW cycles/frame           : 10750.95
+Avg HW decode time/frame      : 13.44 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 11.00
+Frames simulated              : 625
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 6.089e-02
+Frame error rate (FER)        : 2.240e-01
+Avg LDPC iterations/frame     : 8.43
+Avg HW cycles/frame           : 11783.95
+Avg HW decode time/frame      : 14.73 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 11.00
+Frames simulated              : 702
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.255e-02
+Stage-1 FER                   : 3.789e-01
+Final BER (LDPC+GRAND)        : 6.208e-02
+Final FER (LDPC+GRAND)        : 1.994e-01
+Avg stage-1 iters/frame       : 6.33
+Avg HW time/frame (stage-1)   : 11.14 µs
+Avg HW time/frame (GRAND)     : 1598.13 µs
+Avg HW time/frame (total)     : 1609.27 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 11.00
+Frames simulated              : 712
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 6.400e-02
+Stage-1 FER                   : 2.669e-01
+Final BER (LDPC+GRAND)        : 6.083e-02
+Final FER (LDPC+GRAND)        : 1.966e-01
+Avg stage-1 iters/frame       : 7.67
+Avg HW time/frame (stage-1)   : 13.43 µs
+Avg HW time/frame (GRAND)     : 2362.25 µs
+Avg HW time/frame (total)     : 2375.68 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 11.00
+Frames simulated              : 719
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 6.174e-02
+Stage-1 FER                   : 2.225e-01
+Final BER (LDPC+GRAND)        : 5.979e-02
+Final FER (LDPC+GRAND)        : 1.947e-01
+Avg stage-1 iters/frame       : 8.41
+Avg HW time/frame (stage-1)   : 14.70 µs
+Avg HW time/frame (GRAND)     : 3113.20 µs
+Avg HW time/frame (total)     : 3127.89 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 11.00
+Frames simulated              : 521
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 7.144e-02
+Stage-1 FER                   : 3.858e-01
+Final BER (LDPC+GRAND)        : 6.801e-02
+Final FER (LDPC+GRAND)        : 2.687e-01
+Avg stage-1 iters/frame       : 6.33
+Avg HW time/frame (stage-1)   : 11.14 µs
+Avg HW time/frame (GRAND)     : 2743.96 µs
+Avg HW time/frame (total)     : 2755.10 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 11.00
+Frames simulated              : 581
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 6.144e-02
+Stage-1 FER                   : 2.633e-01
+Final BER (LDPC+GRAND)        : 6.083e-02
+Final FER (LDPC+GRAND)        : 2.410e-01
+Avg stage-1 iters/frame       : 7.63
+Avg HW time/frame (stage-1)   : 13.36 µs
+Avg HW time/frame (GRAND)     : 3638.56 µs
+Avg HW time/frame (total)     : 3651.92 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 11.00
+Frames simulated              : 655
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 6.256e-02
+Stage-1 FER                   : 2.275e-01
+Final BER (LDPC+GRAND)        : 6.209e-02
+Final FER (LDPC+GRAND)        : 2.137e-01
+Avg stage-1 iters/frame       : 8.47
+Avg HW time/frame (stage-1)   : 14.80 µs
+Avg HW time/frame (GRAND)     : 4331.57 µs
+Avg HW time/frame (total)     : 4346.37 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 8.50
+Frames simulated              : 244
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.399e-01
+Frame error rate (FER)        : 5.738e-01
+Avg LDPC iterations/frame     : 6.89
+Avg HW cycles/frame           : 9759.17
+Avg HW decode time/frame      : 12.20 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 8.50
+Frames simulated              : 320
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.240e-01
+Frame error rate (FER)        : 4.375e-01
+Avg LDPC iterations/frame     : 8.85
+Avg HW cycles/frame           : 12428.75
+Avg HW decode time/frame      : 15.54 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 8.50
+Frames simulated              : 365
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 1.203e-01
+Frame error rate (FER)        : 3.836e-01
+Avg LDPC iterations/frame     : 9.99
+Avg HW cycles/frame           : 13994.10
+Avg HW decode time/frame      : 17.49 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 8.50
+Frames simulated              : 396
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.248e-01
+Stage-1 FER                   : 5.278e-01
+Final BER (LDPC+GRAND)        : 1.155e-01
+Final FER (LDPC+GRAND)        : 3.535e-01
+Avg stage-1 iters/frame       : 6.84
+Avg HW time/frame (stage-1)   : 12.08 µs
+Avg HW time/frame (GRAND)     : 2786.48 µs
+Avg HW time/frame (total)     : 2798.56 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 8.50
+Frames simulated              : 397
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.182e-01
+Stage-1 FER                   : 4.131e-01
+Final BER (LDPC+GRAND)        : 1.154e-01
+Final FER (LDPC+GRAND)        : 3.526e-01
+Avg stage-1 iters/frame       : 8.75
+Avg HW time/frame (stage-1)   : 15.35 µs
+Avg HW time/frame (GRAND)     : 4175.74 µs
+Avg HW time/frame (total)     : 4191.09 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 8.50
+Frames simulated              : 405
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.161e-01
+Stage-1 FER                   : 3.679e-01
+Final BER (LDPC+GRAND)        : 1.143e-01
+Final FER (LDPC+GRAND)        : 3.457e-01
+Avg stage-1 iters/frame       : 9.93
+Avg HW time/frame (stage-1)   : 17.38 µs
+Avg HW time/frame (GRAND)     : 5500.24 µs
+Avg HW time/frame (total)     : 5517.62 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 8.50
+Frames simulated              : 314
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.333e-01
+Stage-1 FER                   : 5.446e-01
+Final BER (LDPC+GRAND)        : 1.317e-01
+Final FER (LDPC+GRAND)        : 4.459e-01
+Avg stage-1 iters/frame       : 6.86
+Avg HW time/frame (stage-1)   : 12.12 µs
+Avg HW time/frame (GRAND)     : 4424.72 µs
+Avg HW time/frame (total)     : 4436.85 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 8.50
+Frames simulated              : 347
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.227e-01
+Stage-1 FER                   : 4.294e-01
+Final BER (LDPC+GRAND)        : 1.226e-01
+Final FER (LDPC+GRAND)        : 4.035e-01
+Avg stage-1 iters/frame       : 8.83
+Avg HW time/frame (stage-1)   : 15.51 µs
+Avg HW time/frame (GRAND)     : 6046.43 µs
+Avg HW time/frame (total)     : 6061.94 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 8.50
+Frames simulated              : 373
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 1.186e-01
+Stage-1 FER                   : 3.780e-01
+Final BER (LDPC+GRAND)        : 1.186e-01
+Final FER (LDPC+GRAND)        : 3.753e-01
+Avg stage-1 iters/frame       : 9.94
+Avg HW time/frame (stage-1)   : 17.42 µs
+Avg HW time/frame (GRAND)     : 7301.57 µs
+Avg HW time/frame (total)     : 7318.99 µs
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc8
+SNR (dB)                      : 10.00
+Frames simulated              : 333
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 8.627e-02
+Frame error rate (FER)        : 4.204e-01
+Avg LDPC iterations/frame     : 6.54
+Avg HW cycles/frame           : 9223.94
+Avg HW decode time/frame      : 11.53 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc12
+SNR (dB)                      : 10.00
+Frames simulated              : 418
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 8.741e-02
+Frame error rate (FER)        : 3.349e-01
+Avg LDPC iterations/frame     : 8.18
+Avg HW cycles/frame           : 11468.73
+Avg HW decode time/frame      : 14.34 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive LDPC-only Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : ldpc15
+SNR (dB)                      : 10.00
+Frames simulated              : 484
+Frame errors                  : 140 (target=140)
+Bit error rate (BER)          : 8.277e-02
+Frame error rate (FER)        : 2.893e-01
+Avg LDPC iterations/frame     : 9.11
+Avg HW cycles/frame           : 12748.82
+Avg HW decode time/frame      : 15.94 µs
+HW model (fclk_mhz)            : 800.0 MHz
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr8
+SNR (dB)                      : 10.00
+Frames simulated              : 530
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 9.215e-02
+Stage-1 FER                   : 4.453e-01
+Final BER (LDPC+GRAND)        : 8.295e-02
+Final FER (LDPC+GRAND)        : 2.642e-01
+Avg stage-1 iters/frame       : 6.57
+Avg HW time/frame (stage-1)   : 11.59 µs
+Avg HW time/frame (GRAND)     : 2106.50 µs
+Avg HW time/frame (total)     : 2118.09 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr12
+SNR (dB)                      : 10.00
+Frames simulated              : 530
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.339e-02
+Stage-1 FER                   : 3.283e-01
+Final BER (LDPC+GRAND)        : 8.193e-02
+Final FER (LDPC+GRAND)        : 2.642e-01
+Avg stage-1 iters/frame       : 8.15
+Avg HW time/frame (stage-1)   : 14.29 µs
+Avg HW time/frame (GRAND)     : 3126.87 µs
+Avg HW time/frame (total)     : 3141.16 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybahr15
+SNR (dB)                      : 10.00
+Frames simulated              : 530
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.119e-02
+Stage-1 FER                   : 2.811e-01
+Final BER (LDPC+GRAND)        : 8.096e-02
+Final FER (LDPC+GRAND)        : 2.642e-01
+Avg stage-1 iters/frame       : 9.08
+Avg HW time/frame (stage-1)   : 15.88 µs
+Avg HW time/frame (GRAND)     : 4145.88 µs
+Avg HW time/frame (total)     : 4161.76 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr8
+SNR (dB)                      : 10.00
+Frames simulated              : 408
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 9.499e-02
+Stage-1 FER                   : 4.461e-01
+Final BER (LDPC+GRAND)        : 9.327e-02
+Final FER (LDPC+GRAND)        : 3.431e-01
+Avg stage-1 iters/frame       : 6.62
+Avg HW time/frame (stage-1)   : 11.67 µs
+Avg HW time/frame (GRAND)     : 3453.76 µs
+Avg HW time/frame (total)     : 3465.43 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr12
+SNR (dB)                      : 10.00
+Frames simulated              : 434
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.626e-02
+Stage-1 FER                   : 3.410e-01
+Final BER (LDPC+GRAND)        : 8.625e-02
+Final FER (LDPC+GRAND)        : 3.226e-01
+Avg stage-1 iters/frame       : 8.19
+Avg HW time/frame (stage-1)   : 14.36 µs
+Avg HW time/frame (GRAND)     : 4831.39 µs
+Avg HW time/frame (total)     : 4845.75 µs
+
+=== Adaptive HYBRID Monte-Carlo (channel=SIONNA_TDL) ===
+Decoder label                 : hybbgr15
+SNR (dB)                      : 10.00
+Frames simulated              : 512
+Final frame errors            : 140 (target=140)
+Stage-1 BER                   : 8.152e-02
+Stage-1 FER                   : 2.832e-01
+Final BER (LDPC+GRAND)        : 8.152e-02
+Final FER (LDPC+GRAND)        : 2.734e-01
+Avg stage-1 iters/frame       : 9.11
+Avg HW time/frame (stage-1)   : 15.93 µs
+Avg HW time/frame (GRAND)     : 5447.92 µs
+Avg HW time/frame (total)     : 5463.86 µs
