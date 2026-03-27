@@ -6,8 +6,8 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
-mkdir -p logs results
 
+mkdir -p logs results tools
 module --force purge
 module load StdEnv/2023 python/3.11 scipy-stack/2024a
 
@@ -26,7 +26,10 @@ mkdir -p "$NUMBA_CACHE_DIR" "$JOBLIB_TEMP_FOLDER"
 export USE_GPU=${USE_GPU:-0}
 if [[ "${USE_GPU}" != "1" ]]; then
   export CUDA_VISIBLE_DEVICES="-1"
-  export TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-2}
+  export NVIDIA_VISIBLE_DEVICES="void"
+  export TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3}
+  export ABSL_LOG_LEVEL=${ABSL_LOG_LEVEL:-3}
+  export GLOG_minloglevel=${GLOG_minloglevel:-3}
 fi
 
 export TF_INTRA_OP=${TF_INTRA_OP:-1}
@@ -36,6 +39,7 @@ export LDPC_GRAND_NUM_THREADS=${LDPC_GRAND_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-6
 export SNR_MIN_THREADS_PER_WORKER=${SNR_MIN_THREADS_PER_WORKER:-16}
 export PARALLEL_OVER_SNR=${PARALLEL_OVER_SNR:-1}
 export PAIR_DECODER_STREAMS=${PAIR_DECODER_STREAMS:-1}
+
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -122,4 +126,5 @@ printf '[SBATCH CONFIG] CHANNEL=%s TDL=%s DELAY=%s SPEED=[%s,%s] CFO=%s CSI_MODE
   "$CHANNEL_NAME" "$SIONNA_TDL_MODEL" "$SIONNA_TDL_DELAY_SPREAD_S" "$SIONNA_TDL_MIN_SPEED" "$SIONNA_TDL_MAX_SPEED" "$SIONNA_CFO_HZ" "$SIONNA_CSI_MODE"
 printf '[SBATCH CONFIG] RUN_RECEIVER6=%s RUN_RECEIVER8=%s\n' "$RUN_RECEIVER6" "$RUN_RECEIVER8"
 
-python HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py "$RESULTS_DIR" sionna5g
+python -u run_main_quiet.py "$RESULTS_DIR" sionna5g \
+  2> >(python -u tools/filter_tf_stderr.py >&2)

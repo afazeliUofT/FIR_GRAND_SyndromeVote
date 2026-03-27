@@ -3,8 +3,8 @@ import os
 import re
 import sys
 
-USE_GPU = str(os.getenv("USE_GPU", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
+USE_GPU = str(os.getenv("USE_GPU", "0")).strip().lower() in {"1", "true", "yes", "on"}
 BENIGN_PATTERNS = [
     re.compile(r"Unable to register cuDNN factory"),
     re.compile(r"Unable to register cuFFT factory"),

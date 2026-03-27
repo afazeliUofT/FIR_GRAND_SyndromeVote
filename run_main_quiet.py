@@ -16,7 +16,8 @@ def main() -> None:
         os.environ["TF_CPP_MIN_LOG_LEVEL"] = os.getenv("TF_CPP_MIN_LOG_LEVEL", "3")
         os.environ.setdefault("ABSL_LOG_LEVEL", os.getenv("ABSL_LOG_LEVEL", "3"))
         os.environ.setdefault("GLOG_minloglevel", os.getenv("GLOG_minloglevel", "3"))
-        os.environ.setdefault("TF_USE_LEGACY_KERAS", "0")
+    os.environ.setdefault("TF_USE_LEGACY_KERAS", "0")
+
     target = os.path.join(os.path.dirname(__file__), "HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py")
     sys.argv = [target, *sys.argv[1:]]
     runpy.run_path(target, run_name="__main__")
