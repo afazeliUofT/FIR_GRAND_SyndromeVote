@@ -6388,6 +6388,34 @@ grand_cfg_awgn_bgr_boost = ClusterGrandConfig(
 
 
 
+
+
+# ---- Receiver 8: cascade AHR -> basis-GRAND fallback on the same LDPC snapshots ----
+RUN_RECEIVER8 = bool(_get_int_env("RUN_RECEIVER8", 0))
+GRAND_META_USE_FALLBACK = bool(_get_int_env("GRAND_META_USE_FALLBACK", 1))
+
+# Stronger primary profile built from Receiver-6 because the committed localbias results
+# show the anchored-restart / soft-hypothesis path is consistently better than Receiver-7.
+grand_cfg_awgn_meta = copy.deepcopy(grand_cfg_awgn_ahr)
+grand_cfg_awgn_meta.max_patterns = _get_int_env("GRAND_META_MAX_PATTERNS", max(int(getattr(grand_cfg_awgn_ahr, "max_patterns", 0) or 0), 140000))
+grand_cfg_awgn_meta.restart_max_candidates = _get_int_env("GRAND_META_RESTART_MAX_CANDIDATES", max(int(getattr(grand_cfg_awgn_ahr, "restart_max_candidates", 0) or 0), 28))
+grand_cfg_awgn_meta.restart_ldpc_iters = _get_int_env("GRAND_META_RESTART_ITERS", max(int(getattr(grand_cfg_awgn_ahr, "restart_ldpc_iters", 0) or 0), 22))
+grand_cfg_awgn_meta.restart_llr_gain = _get_float_env("GRAND_META_RESTART_GAIN", max(float(getattr(grand_cfg_awgn_ahr, "restart_llr_gain", 0.0) or 0.0), 5.4))
+grand_cfg_awgn_meta.restart_dual_gain = _get_float_env("GRAND_META_RESTART_DUAL_GAIN", max(float(getattr(grand_cfg_awgn_ahr, "restart_dual_gain", 0.0) or 0.0), 7.8))
+grand_cfg_awgn_meta.soft_candidate_ratio = _get_float_env("GRAND_META_RATIO", max(float(getattr(grand_cfg_awgn_ahr, "soft_candidate_ratio", 0.0) or 0.0), 3.6))
+grand_cfg_awgn_meta.soft_max_candidates = _get_int_env("GRAND_META_MAX_CANDIDATES", max(int(getattr(grand_cfg_awgn_ahr, "soft_max_candidates", 0) or 0), 160))
+grand_cfg_awgn_meta.soft_core_max_bits = _get_int_env("GRAND_META_CORE_MAX_BITS", max(int(getattr(grand_cfg_awgn_ahr, "soft_core_max_bits", 0) or 0), 16))
+grand_cfg_awgn_meta.peel_candidate_ratio = _get_float_env("GRAND_META_PEEL_RATIO", max(float(getattr(grand_cfg_awgn_ahr, "peel_candidate_ratio", 0.0) or 0.0), 2.3))
+
+grand_cfg_awgn_meta_boost = copy.deepcopy(grand_cfg_awgn_ahr_boost)
+grand_cfg_awgn_meta_boost.max_patterns = _get_int_env("GRAND_META_BOOST_MAX_PATTERNS", max(int(getattr(grand_cfg_awgn_ahr_boost, "max_patterns", 0) or 0), 800000))
+grand_cfg_awgn_meta_boost.restart_max_candidates = _get_int_env("GRAND_META_RESTART_MAX_CANDIDATES", max(int(getattr(grand_cfg_awgn_ahr_boost, "restart_max_candidates", 0) or 0), 28))
+grand_cfg_awgn_meta_boost.restart_ldpc_iters = _get_int_env("GRAND_META_RESTART_ITERS", max(int(getattr(grand_cfg_awgn_ahr_boost, "restart_ldpc_iters", 0) or 0), 22))
+grand_cfg_awgn_meta_boost.restart_llr_gain = _get_float_env("GRAND_META_RESTART_GAIN", max(float(getattr(grand_cfg_awgn_ahr_boost, "restart_llr_gain", 0.0) or 0.0), 5.4))
+grand_cfg_awgn_meta_boost.restart_dual_gain = _get_float_env("GRAND_META_RESTART_DUAL_GAIN", max(float(getattr(grand_cfg_awgn_ahr_boost, "restart_dual_gain", 0.0) or 0.0), 7.8))
+grand_cfg_awgn_meta_boost.soft_candidate_ratio = _get_float_env("GRAND_META_RATIO", max(float(getattr(grand_cfg_awgn_ahr_boost, "soft_candidate_ratio", 0.0) or 0.0), 3.6))
+grand_cfg_awgn_meta_boost.soft_max_candidates = _get_int_env("GRAND_META_MAX_CANDIDATES", max(int(getattr(grand_cfg_awgn_ahr_boost, "soft_max_candidates", 0) or 0), 160))
+grand_cfg_awgn_meta_boost.soft_core_max_bits = _get_int_env("GRAND_META_CORE_MAX_BITS", max(int(getattr(grand_cfg_awgn_ahr_boost, "soft_core_max_bits", 0) or 0), 16))
 ### CELL number 28-B ###
 import os
 import math
@@ -7157,6 +7185,9 @@ def run_hybrid_ldpc_grand_adaptive(
     label: Optional[str] = None,
     hw_model: Optional[HardwareTimingModel] = None,
     grand_cfg_boost: Optional[ClusterGrandConfig] = None,
+    grand_cfg_fallback: Optional[ClusterGrandConfig] = None,
+    grand_cfg_boost_fallback: Optional[ClusterGrandConfig] = None,
+    fallback_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Hybrid decoder (two-stage):
@@ -7186,6 +7217,9 @@ def run_hybrid_ldpc_grand_adaptive(
     if label is None:
         snap_desc = str(primary_snapshot_iter) if len(snapshot_schedule) == 1 else ",".join(str(x) for x in snapshot_schedule)
         label = f"hyb: LDPC({dec_cfg_stage1.max_iters})+GRAND (snap={snap_desc})"
+
+    if fallback_label is None:
+        fallback_label = str(getattr(grand_cfg_fallback, "pre_solver_mode", "fallback")) if grand_cfg_fallback is not None else ""
 
     if rng_seed is None:
         rng_seed = sim_cfg.rng_seed_global + 900 + primary_snapshot_iter
@@ -7249,6 +7283,18 @@ def run_hybrid_ldpc_grand_adaptive(
     per_frame_snapshot_success_iter = []
     per_frame_snapshot_last_iter = []
 
+    per_frame_bit_errors_stage1 = []
+    per_frame_bit_errors_after = []
+    per_frame_stage2_improved = []
+    per_frame_stage2_true_fix = []
+    per_frame_stage1_syndrome_weight = []
+    per_frame_stage1_error_span = []
+    per_frame_stage1_error_runs = []
+    per_frame_stage1_block_concentration = []
+    per_frame_stage2_success_profile = []
+
+    diag_block_size = max(1, int(float(os.getenv("SIONNA_CSI_BLOCK_SC", os.getenv("SIONNA_CSI_PILOT_STRIDE", "1")) or 1)))
+
     n_frames = 0
     frame_id = 0
 
@@ -7273,6 +7319,11 @@ def run_hybrid_ldpc_grand_adaptive(
         syn_w = int(frame.syndrome_final.sum())
         stage1_failed = (syn_w != 0)
         per_frame_stage1_failed.append(bool(stage1_failed))
+
+        stage1_err_pos = np.asarray(frame.error_positions_final, dtype=np.int32).reshape(-1)
+        stage1_err_span = _diag_error_span(stage1_err_pos)
+        stage1_err_runs = _diag_error_runs(stage1_err_pos)
+        stage1_block_conc = _diag_block_concentration(stage1_err_pos, diag_block_size)
 
         final_vn2cn_executed_stage1 = bool((not dec_cfg_stage1.early_stop) or (syn_w != 0))
         hw_c_stage1 = ldpc_hw_cycles_frame(
@@ -7319,34 +7370,45 @@ def run_hybrid_ldpc_grand_adaptive(
         snapshot_attempts = 0
         snapshot_success_iter = 0
         snapshot_last_iter = 0
+        stage2_success_profile = "stage1"
 
         if stage1_failed:
             attempt_results: List[ClusterGrandResult] = []
             res_final: Optional[ClusterGrandResult] = None
 
-            for snap in snapshot_schedule:
-                snap_i = int(snap)
-                snapshot_attempts += 1
-                snapshot_last_iter = snap_i
+            stage2_profiles = [(str(getattr(grand_cfg, "pre_solver_mode", "primary")), grand_cfg, grand_cfg_boost)]
+            if grand_cfg_fallback is not None:
+                stage2_profiles.append((fallback_label or str(getattr(grand_cfg_fallback, "pre_solver_mode", "fallback")), grand_cfg_fallback, grand_cfg_boost_fallback))
 
-                res_snap, res_attempts = _run_stage2_single_snapshot(
-                    frame=frame,
-                    sim_cfg=sim_cfg,
-                    snapshot_iter=snap_i,
-                    grand_cfg=grand_cfg,
-                    grand_cfg_boost=grand_cfg_boost,
-                )
+            for profile_name, profile_cfg, profile_boost in stage2_profiles:
+                for snap in snapshot_schedule:
+                    snap_i = int(snap)
+                    snapshot_attempts += 1
+                    snapshot_last_iter = snap_i
 
-                for res_try in res_attempts:
-                    setattr(res_try, "snapshot_iter_used", snap_i)
-                    hw_c_grand += grand_hw_cycles_from_result(res_try, sim_cfg, hw_model)
-                attempt_results.extend(res_attempts)
+                    res_snap, res_attempts = _run_stage2_single_snapshot(
+                        frame=frame,
+                        sim_cfg=sim_cfg,
+                        snapshot_iter=snap_i,
+                        grand_cfg=profile_cfg,
+                        grand_cfg_boost=profile_boost,
+                    )
 
-                if res_snap is not None:
-                    res_final = res_snap
-                    if bool(res_snap.success):
-                        snapshot_success_iter = snap_i
-                        break
+                    for res_try in res_attempts:
+                        setattr(res_try, "snapshot_iter_used", snap_i)
+                        setattr(res_try, "stage2_profile_name", profile_name)
+                        hw_c_grand += grand_hw_cycles_from_result(res_try, sim_cfg, hw_model)
+                    attempt_results.extend(res_attempts)
+
+                    if res_snap is not None:
+                        res_final = res_snap
+                        setattr(res_final, "stage2_profile_name", profile_name)
+                        if bool(res_snap.success):
+                            snapshot_success_iter = snap_i
+                            stage2_success_profile = profile_name
+                            break
+                if stage2_success_profile != "stage1":
+                    break
 
             res = None
             if (res_final is not None) and attempt_results:
@@ -7362,6 +7424,7 @@ def run_hybrid_ldpc_grand_adaptive(
                 res = res_final
 
             if res is not None:
+                setattr(res, "stage2_profile_name", stage2_success_profile if stage2_success_profile != "stage1" else str(getattr(res, "stage2_profile_name", getattr(grand_cfg, "pre_solver_mode", "primary"))))
                 if hw_c_grand == 0:
                     hw_c_grand = grand_hw_cycles_from_result(res, sim_cfg, hw_model)
 
@@ -7400,6 +7463,7 @@ def run_hybrid_ldpc_grand_adaptive(
                 snapshot_attempts = int(getattr(res, "snapshot_attempts_count", snapshot_attempts))
                 snapshot_success_iter = int(getattr(res, "snapshot_success_iter", snapshot_success_iter))
                 snapshot_last_iter = int(getattr(res, "snapshot_last_iter", snapshot_last_iter))
+                stage2_success_profile = str(getattr(res, "stage2_profile_name", stage2_success_profile))
 
         total_bit_errs_after += be_after
         if be_after > 0:
@@ -7445,6 +7509,15 @@ def run_hybrid_ldpc_grand_adaptive(
         per_frame_snapshot_attempts.append(int(snapshot_attempts))
         per_frame_snapshot_success_iter.append(int(snapshot_success_iter))
         per_frame_snapshot_last_iter.append(int(snapshot_last_iter))
+        per_frame_bit_errors_stage1.append(int(be1))
+        per_frame_bit_errors_after.append(int(be_after))
+        per_frame_stage2_improved.append(int(stage1_failed and (be_after < be1)))
+        per_frame_stage2_true_fix.append(int(stage1_failed and (be_after == 0)))
+        per_frame_stage1_syndrome_weight.append(int(syn_w))
+        per_frame_stage1_error_span.append(int(stage1_err_span))
+        per_frame_stage1_error_runs.append(int(stage1_err_runs))
+        per_frame_stage1_block_concentration.append(float(stage1_block_conc))
+        per_frame_stage2_success_profile.append(str(stage2_success_profile))
 
         n_frames += 1
         frame_id += 1
@@ -7548,11 +7621,21 @@ def run_hybrid_ldpc_grand_adaptive(
         "per_frame_snapshot_attempts": np.array(per_frame_snapshot_attempts, dtype=np.int32),
         "per_frame_snapshot_success_iter": np.array(per_frame_snapshot_success_iter, dtype=np.int32),
         "per_frame_snapshot_last_iter": np.array(per_frame_snapshot_last_iter, dtype=np.int32),
+        "per_frame_bit_errors_stage1": np.array(per_frame_bit_errors_stage1, dtype=np.int32),
+        "per_frame_bit_errors_after": np.array(per_frame_bit_errors_after, dtype=np.int32),
+        "per_frame_stage2_improved": np.array(per_frame_stage2_improved, dtype=np.int8),
+        "per_frame_stage2_true_fix": np.array(per_frame_stage2_true_fix, dtype=np.int8),
+        "per_frame_stage1_syndrome_weight": np.array(per_frame_stage1_syndrome_weight, dtype=np.int32),
+        "per_frame_stage1_error_span": np.array(per_frame_stage1_error_span, dtype=np.int32),
+        "per_frame_stage1_error_runs": np.array(per_frame_stage1_error_runs, dtype=np.int32),
+        "per_frame_stage1_block_concentration": np.array(per_frame_stage1_block_concentration, dtype=np.float32),
+        "per_frame_stage2_success_profile": np.array(per_frame_stage2_success_profile, dtype=object),
         "grand_selection_mode": str(getattr(grand_cfg, "selection_mode", "llr")),
         "grand_llr_source": str(getattr(grand_cfg, "llr_source", "posterior")),
         "grand_sv_check_cover_k": int(getattr(grand_cfg, "sv_check_cover_k", 0)),
         "grand_sv_epsilon": float(getattr(grand_cfg, "sv_epsilon", 0.0)),
         "grand_pre_solver_mode": str(getattr(grand_cfg, "pre_solver_mode", "none")),
+        "grand_fallback_profile": str(fallback_label or ""),
         "grand_peel_candidate_ratio": float(getattr(grand_cfg, "peel_candidate_ratio", 1.0)),
         "grand_peel_max_bits": int(getattr(grand_cfg, "peel_max_bits", 0) or 0),
         "grand_snapshot_schedule": np.asarray(snapshot_schedule, dtype=np.int32),
@@ -7584,6 +7667,35 @@ mc_cfg = AdaptiveMCConfig(
 ### CELL number 31 ###
 import csv
 import pickle
+
+
+
+def _diag_error_span(error_positions: np.ndarray) -> int:
+    pos = np.asarray(error_positions, dtype=np.int64).reshape(-1)
+    if pos.size == 0:
+        return 0
+    return int(pos.max() - pos.min() + 1)
+
+
+def _diag_error_runs(error_positions: np.ndarray) -> int:
+    pos = np.asarray(error_positions, dtype=np.int64).reshape(-1)
+    if pos.size == 0:
+        return 0
+    pos = np.unique(np.sort(pos))
+    if pos.size == 0:
+        return 0
+    return int(1 + np.count_nonzero(np.diff(pos) > 1))
+
+
+def _diag_block_concentration(error_positions: np.ndarray, block_size: int) -> float:
+    pos = np.asarray(error_positions, dtype=np.int64).reshape(-1)
+    if pos.size == 0:
+        return 0.0
+    block = max(1, int(block_size))
+    bins = pos // block
+    _, counts = np.unique(bins, return_counts=True)
+    return float(np.max(counts) / pos.size)
+
 
 def _dist_stats(arr) -> dict:
     """Return mean/p95/p99/max for a 1D array; NaNs if empty."""
@@ -7972,6 +8084,95 @@ def save_awgn_results(
                     row["disagreement_added_max"]  = disagree_s["max"]
 
                 writer.writerow(row)
+
+
+# ---- NEW: hybrid diagnostics summary ----
+# Focus on what actually explains hybrid gains or failures: stage-2 invocation,
+# true-fix rate, error locality at the stage-1 output, and which cascade profile won.
+diag_iters = sorted({
+    int(x)
+    for stats_all in results.values()
+    for stats in (stats_all.values() if isinstance(stats_all, dict) else [])
+    for x in np.asarray(stats.get("grand_snapshot_schedule", []), dtype=np.int32).reshape(-1)
+    if int(x) > 0
+})
+diag_fields = [
+    "snr_db", "decoder", "n_frames", "ber", "fer", "ber_stage1", "fer_stage1",
+    "stage2_invocation_rate", "stage2_improve_rate_if_invoked", "stage2_true_fix_rate_if_invoked",
+    "avg_stage1_bit_errors_if_invoked", "p95_stage1_bit_errors_if_invoked",
+    "avg_stage1_syndrome_weight_if_invoked", "p95_stage1_syndrome_weight_if_invoked",
+    "avg_stage1_error_span_if_invoked", "p95_stage1_error_span_if_invoked",
+    "avg_stage1_error_runs_if_invoked", "p95_stage1_error_runs_if_invoked",
+    "avg_stage1_block_concentration_if_invoked", "p95_stage1_block_concentration_if_invoked",
+    "avg_snapshot_attempts_if_invoked", "avg_snapshot_success_iter_if_fixed",
+    "primary_success_rate_if_invoked", "fallback_success_rate_if_invoked",
+] + [f"snapshot_success_at_{it}" for it in diag_iters]
+
+diag_path = os.path.join(output_dir, base_name + "_summary_diagnostics.csv")
+with open(diag_path, "w", newline="") as fcsv:
+    writer = csv.DictWriter(fcsv, fieldnames=diag_fields)
+    writer.writeheader()
+    for snr in sorted(results.keys()):
+        stats_all = results[snr]
+        for dec_name, stats in stats_all.items():
+            row = {k: np.nan for k in diag_fields}
+            row["snr_db"] = float(snr)
+            row["decoder"] = str(dec_name)
+            row["n_frames"] = int(stats.get("n_frames", stats.get("num_frames", 0)))
+            row["ber"] = float(stats.get("ber_after", stats.get("ber", np.nan)))
+            row["fer"] = float(stats.get("fer_after", stats.get("fer", np.nan)))
+            row["ber_stage1"] = float(stats.get("ber_ldpc", stats.get("ber", np.nan)))
+            row["fer_stage1"] = float(stats.get("fer_ldpc", stats.get("fer", np.nan)))
+
+            invoked = np.asarray(stats.get("per_frame_stage1_failed", []), dtype=np.bool_)
+            be1 = np.asarray(stats.get("per_frame_bit_errors_stage1", []), dtype=np.int32)
+            syn = np.asarray(stats.get("per_frame_stage1_syndrome_weight", []), dtype=np.int32)
+            esp = np.asarray(stats.get("per_frame_stage1_error_span", []), dtype=np.int32)
+            ern = np.asarray(stats.get("per_frame_stage1_error_runs", []), dtype=np.int32)
+            bconc = np.asarray(stats.get("per_frame_stage1_block_concentration", []), dtype=np.float64)
+            satt = np.asarray(stats.get("per_frame_snapshot_attempts", []), dtype=np.int32)
+            ssucc = np.asarray(stats.get("per_frame_snapshot_success_iter", []), dtype=np.int32)
+            simp = np.asarray(stats.get("per_frame_stage2_improved", []), dtype=np.int8)
+            sfix = np.asarray(stats.get("per_frame_stage2_true_fix", []), dtype=np.int8)
+            profile = np.asarray(stats.get("per_frame_stage2_success_profile", []), dtype=object)
+            fallback_profile = str(stats.get("grand_fallback_profile", "") or "")
+            primary_profile = str(stats.get("grand_pre_solver_mode", "") or "")
+
+            if invoked.size > 0:
+                row["stage2_invocation_rate"] = float(invoked.mean())
+            if invoked.any():
+                mask = invoked.astype(bool)
+                def _safe_mean(a):
+                    a = np.asarray(a)
+                    return float(a.mean()) if a.size else np.nan
+                def _safe_p95(a):
+                    a = np.asarray(a)
+                    return float(np.percentile(a, 95)) if a.size else np.nan
+                row["stage2_improve_rate_if_invoked"] = _safe_mean(simp[mask])
+                row["stage2_true_fix_rate_if_invoked"] = _safe_mean(sfix[mask])
+                row["avg_stage1_bit_errors_if_invoked"] = _safe_mean(be1[mask])
+                row["p95_stage1_bit_errors_if_invoked"] = _safe_p95(be1[mask])
+                row["avg_stage1_syndrome_weight_if_invoked"] = _safe_mean(syn[mask])
+                row["p95_stage1_syndrome_weight_if_invoked"] = _safe_p95(syn[mask])
+                row["avg_stage1_error_span_if_invoked"] = _safe_mean(esp[mask])
+                row["p95_stage1_error_span_if_invoked"] = _safe_p95(esp[mask])
+                row["avg_stage1_error_runs_if_invoked"] = _safe_mean(ern[mask])
+                row["p95_stage1_error_runs_if_invoked"] = _safe_p95(ern[mask])
+                row["avg_stage1_block_concentration_if_invoked"] = _safe_mean(bconc[mask])
+                row["p95_stage1_block_concentration_if_invoked"] = _safe_p95(bconc[mask])
+                row["avg_snapshot_attempts_if_invoked"] = _safe_mean(satt[mask])
+                fixed_mask = mask & (sfix.astype(bool))
+                if fixed_mask.any():
+                    row["avg_snapshot_success_iter_if_fixed"] = _safe_mean(ssucc[fixed_mask])
+                if profile.size == invoked.size:
+                    if primary_profile:
+                        row["primary_success_rate_if_invoked"] = float(np.mean(np.asarray([str(x) == primary_profile for x in profile[mask]], dtype=np.float64)))
+                    if fallback_profile:
+                        row["fallback_success_rate_if_invoked"] = float(np.mean(np.asarray([str(x) == fallback_profile for x in profile[mask]], dtype=np.float64)))
+                if diag_iters:
+                    for it in diag_iters:
+                        row[f"snapshot_success_at_{it}"] = float(np.mean((ssucc[mask] == int(it)).astype(np.float64)))
+            writer.writerow(row)
 
     print(f"[save_awgn_results] Wrote raw results : {pkl_path}")
     print(f"[save_awgn_results] Wrote mean summary: {csv_path}")
@@ -8455,6 +8656,7 @@ def run_awgn_sweep_for_code(
     run_receiver5 = bool(_env_int("RUN_RECEIVER5", 0))
     run_receiver6 = bool(_env_int("RUN_RECEIVER6", 0))
     run_receiver7 = bool(_env_int("RUN_RECEIVER7", 0))
+    run_receiver8 = bool(_env_int("RUN_RECEIVER8", 0))
     pair_decoder_streams = bool(_env_int("PAIR_DECODER_STREAMS", 0))
 
     results: Dict[float, Dict[str, Any]] = {}
@@ -8702,6 +8904,36 @@ def run_awgn_sweep_for_code(
                     rng_seed=seed,
                     label=dec_name,
                     grand_cfg_boost=(grand_cfg_awgn_bgr_boost if GRAND_BGR_USE_BOOST else None),
+                )
+
+        # Scenario 10: Receiver 8 (cascade: strong AHR primary, BGR fallback on the same snapshots)
+        if run_receiver8:
+            for it in stage1_list:
+                dec_name = f"hybmeta{int(it)}"
+                snapshot_schedule = _resolve_grand_snapshot_schedule(int(it))
+                seed = _decoder_seed(80_000, int(it))
+                dec_cfg = DecoderConfig(max_iters=int(it), alpha=float(alpha), early_stop=True)
+
+                sim_cfg_hyb = SimulationConfig(
+                    code=code_cfg,
+                    channel=ChannelConfig(name=channel_name, snr_db=snr_db),
+                    interleaver=interleaver,
+                    rng_seed_global=int(base_seed),
+                    snapshot_iters=snapshot_schedule,
+                )
+
+                per_snr[dec_name] = run_hybrid_ldpc_grand_adaptive(
+                    sim_cfg=sim_cfg_hyb,
+                    dec_cfg_stage1=dec_cfg,
+                    grand_cfg=grand_cfg_awgn_meta,
+                    snapshot_iter=snapshot_schedule,
+                    mc_cfg=mc_cfg_local,
+                    rng_seed=seed,
+                    label=dec_name,
+                    grand_cfg_boost=(grand_cfg_awgn_meta_boost if GRAND_AHR_USE_BOOST else None),
+                    grand_cfg_fallback=(grand_cfg_awgn_bgr if GRAND_META_USE_FALLBACK else None),
+                    grand_cfg_boost_fallback=(grand_cfg_awgn_bgr_boost if (GRAND_META_USE_FALLBACK and GRAND_BGR_USE_BOOST) else None),
+                    fallback_label="basis_anchor",
                 )
 
         return snr_db, per_snr

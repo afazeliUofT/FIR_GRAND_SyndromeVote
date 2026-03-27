@@ -1,0 +1,14 @@
+2026-03-26 17:57:35.289004: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1774573056.442797 2283529 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1774573057.004672 2283529 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1774573059.377229 2283529 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1774573059.377295 2283529 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1774573059.377305 2283529 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1774573059.377312 2283529 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-03-26 17:57:57.072668: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+Traceback (most recent call last):
+  File "/scratch/rsadve1/FIR_GRAND_SyndromeVote/HW3_PARALLEL_Narval_LDPC_GRAND_MS_PATCH.py", line 6399, in <module>
+    grand_cfg_awgn_meta = copy.deepcopy(grand_cfg_awgn_ahr)
+                          ^^^^
+NameError: name 'copy' is not defined
