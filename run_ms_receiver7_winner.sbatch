@@ -6,8 +6,7 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
-
-mkdir -p logs results
+mkdir -p logs results tools
 
 module --force purge
 module load StdEnv/2023 python/3.11 scipy-stack/2024a
@@ -41,7 +40,6 @@ export SNR_MIN_THREADS_PER_WORKER=${SNR_MIN_THREADS_PER_WORKER:-16}
 export PARALLEL_OVER_SNR=${PARALLEL_OVER_SNR:-1}
 export PAIR_DECODER_STREAMS=${PAIR_DECODER_STREAMS:-1}
 export GRAND_RESCUE_SNAPSHOT_ITERS=${GRAND_RESCUE_SNAPSHOT_ITERS:-4,8,12,15,20,40,60,80,100}
-
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -71,9 +69,7 @@ export SIONNA_CSI_AMP_RIPPLE_DB=${SIONNA_CSI_AMP_RIPPLE_DB:-1.0}
 export SIONNA_CSI_DELAY_BIAS_NS=${SIONNA_CSI_DELAY_BIAS_NS:-10.0}
 export SIONNA_CSI_BLOCK_SC=${SIONNA_CSI_BLOCK_SC:-12}
 export SIONNA_LLR_MAX=${SIONNA_LLR_MAX:-50.0}
-export FORCE_DEFAULTS=1
 
-# Only compare the strongest legacy baseline against Receiver-7.
 export RUN_RECEIVER1=${RUN_RECEIVER1:-0}
 export RUN_RECEIVER2=${RUN_RECEIVER2:-0}
 export RUN_RECEIVER3=${RUN_RECEIVER3:-0}
@@ -82,7 +78,6 @@ export RUN_RECEIVER5=${RUN_RECEIVER5:-0}
 export RUN_RECEIVER6=${RUN_RECEIVER6:-0}
 export RUN_RECEIVER7=${RUN_RECEIVER7:-1}
 
-# Receiver-7 / basis-GRAND settings: bias toward FER, not stage-2 economy.
 export GRAND_BGR_LLR_SOURCE=${GRAND_BGR_LLR_SOURCE:-mixed}
 export GRAND_BGR_CHECK_COVER_K=${GRAND_BGR_CHECK_COVER_K:-3}
 export GRAND_BGR_EPSILON=${GRAND_BGR_EPSILON:-1e-3}
@@ -109,7 +104,6 @@ export GRAND_BGR_GROUP_MAX_BITS=${GRAND_BGR_GROUP_MAX_BITS:-12}
 export GRAND_BGR_WINDOW_MAX=${GRAND_BGR_WINDOW_MAX:-7}
 export GRAND_BGR_WINDOW_SPAN=${GRAND_BGR_WINDOW_SPAN:-20}
 
-# The run is intentionally narrow and fair: same frames, same stage-1 depth.
 export STAGE1_ITERS=${STAGE1_ITERS:-100}
 export LDPC_ITERS=${LDPC_ITERS:-100}
 export SNR_SWEEP=${SNR_SWEEP:-10.0,10.5,11.0,11.5,12.0,12.5,13.0}
@@ -126,4 +120,4 @@ echo "[SBATCH CONFIG] RUN_RECEIVER1=${RUN_RECEIVER1} RUN_RECEIVER7=${RUN_RECEIVE
 echo "[SBATCH CONFIG] GRAND_BGR_MAX_WEIGHT=${GRAND_BGR_MAX_WEIGHT} GRAND_BGR_MAX_PATTERNS=${GRAND_BGR_MAX_PATTERNS} GRAND_BGR_BOOST_MAX_PATTERNS=${GRAND_BGR_BOOST_MAX_PATTERNS}"
 echo "[SBATCH CONFIG] GRAND_BGR_RATIO=${GRAND_BGR_RATIO} GRAND_BGR_MAX_BITS=${GRAND_BGR_MAX_BITS} GRAND_BGR_MAX_VECTORS=${GRAND_BGR_MAX_VECTORS} GRAND_BGR_MAX_CANDIDATES=${GRAND_BGR_MAX_CANDIDATES}"
 
-python -u run_main_quiet.py "$OUT_PREFIX" sionna5g 2> >(python -u tools/filter_tf_stderr.py >&2)
+python -u run_main_quiet.py "$OUT_PREFIX" sionna5g   2> >(python -u tools/filter_tf_stderr.py >&2)

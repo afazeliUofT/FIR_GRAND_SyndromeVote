@@ -5,7 +5,6 @@ import sys
 
 USE_GPU = str(os.getenv("USE_GPU", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
-# Only suppress known non-fatal CPU-node TensorFlow/Sionna GPU-probe noise.
 BENIGN_PATTERNS = [
     re.compile(r"Unable to register cuDNN factory"),
     re.compile(r"Unable to register cuFFT factory"),
